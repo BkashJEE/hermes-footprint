@@ -16,14 +16,13 @@ const ROUTE = '/footprint'
 const CLI_TIMEOUT_MS = 120000
 
 // ── data ────────────────────────────────────────────────────────────────────
+// Footprint measures THIS machine's disk, so it always runs on a local route, never on a
+// remote connection (a chat focused on another machine must not move the scan there).
 async function resolveRoute() {
-  const owner = host.state?.focusedSessionOwner?.get?.() || null
-  const routes = await host.profileRoutes()
-  const exact = owner ? routes.filter((r) => r.connectionId === owner.connectionId && r.profile === owner.profile) : []
-  if (exact.length === 1) return exact[0]
-  const fallback = routes.find((r) => r.primary) || routes.find((r) => r.mode === 'local') || routes[0]
-  if (!fallback) throw new Error('No Hermes profile route available')
-  return fallback
+  const routes = (await host.profileRoutes()).filter((r) => r.mode === 'local')
+  const route = routes.find((r) => r.primary) || routes[0]
+  if (!route) throw new Error('No local Hermes profile available')
+  return route
 }
 
 function parseCliJson(output) {
