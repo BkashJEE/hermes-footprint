@@ -26,7 +26,7 @@ createRoot(document.getElementById('chip')).render(reg.find((c) => c.area === 's
 const view = new URLSearchParams(location.search).get('view')
 const click = (re) => [...document.querySelectorAll('button')].find((b) => re.test(b.textContent))?.click()
 const key = (k) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k }))
-const steps = { bots: [() => click(/^Made by your Bots/)], deck: [() => click(/^Review one by one/)],
+const steps = { cards: [() => click(/^Can go/)], bots: [() => click(/^Made by your Bots/)], deck: [() => click(/^Review one by one/)],
   'deck-end': [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t')],
   confirm: [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => click(/^Next: confirm/)] }
 if (view && steps[view]) { try { localStorage.clear() } catch {}; steps[view].forEach((f, i) => setTimeout(f, 1500 + i * 120)) }

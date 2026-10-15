@@ -351,8 +351,8 @@ function ActionRow({ item, compact }) {
 }
 
 // One card at a time: Keep (K) or Trash (T). Trash only marks; the Trash step still asks once more.
-function Deck({ items, onDone, onCancel }) {
-  const [i, setI] = useState(0)
+function Deck({ items, onDone, onCancel, start = 0 }) {
+  const [i, setI] = useState(start)
   const [picks, setPicks] = useState({})
   const r = items[i]
   const decide = (choice) => { setPicks((p) => ({ ...p, [r.path]: choice })); setI((n) => n + 1) }
@@ -384,7 +384,7 @@ function Deck({ items, onDone, onCancel }) {
   const sf = safety(r)
   return shell(jsxs('div', { style: { width: 'min(520px, 92%)' }, children: [
     jsx('div', { style: { display: 'flex', gap: 4, marginBottom: 10 }, children: items.map((x, k) => jsx('div', { key: x.path, style: { flex: 1, height: 3, borderRadius: 2,
-      background: k < i ? (picks[x.path] === 'trash' ? C.red : C.green) : k === i ? C.t1 : C.stroke } })) }),
+      background: picks[x.path] === 'trash' ? C.red : picks[x.path] === 'keep' ? C.green : k === i ? C.t1 : C.stroke } })) }),
     jsxs('div', { key: r.path, style: { position: 'relative', background: C.panel, border: `1px solid ${C.stroke}`, borderTop: `3px solid ${kindCss(r.kind)}`, borderRadius: 14, padding: '18px 20px',
       boxShadow: '0 24px 60px rgba(0,0,0,.55)', animation: 'fpIn .18s ease-out' }, children: [
       jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 8 }, children: [
@@ -404,6 +404,88 @@ function Deck({ items, onDone, onCancel }) {
     ] }),
     jsx('div', { style: { textAlign: 'center', fontSize: 11, color: C.t4, marginTop: 10 }, children: 'Nothing moves until you confirm at the end. Esc to stop.' }),
   ] }))
+}
+
+// ── catalog-style cards (same shape as the Hermes plugin catalog) ────────────
+const KIND_GLYPH = { app: '◆', toolchain: '⚙', memory: '◉', skills: '✦', worktree: '⑂', backup: '⧉', browser: '◎', cache: '◫', bot: '☺', other: '▢' }
+// A card's plain name, and its bullets: why it can go, then when it changed or what to check.
+function whatItIs(r) {
+  const parts = r.path.split('/'), name = parts[parts.length - 1]
+  const bot = /profiles\/([^/]+)/.exec(r.path)?.[1]
+  const browser = bot ? `${bot}'s browser` : 'Hermes browser'
+  let title
+  if (r.kind === 'worktree') title = `Worktree ${name}`
+  else if (name === 'uv') title = 'Python package cache'
+  else if (name === 'pip') title = 'pip package cache'
+  else if (name === '_cacache') title = 'npm package cache'
+  else if (name === '__pycache__') title = `Compiled Python ${/python-(\d+\.\d+)/.exec(r.path)?.[1] || ''}`.trim()
+  else if (name === 'node_modules') title = `npm packages (${parts[parts.length - 2]})`
+  else if (name === 'Code Cache') title = `${browser} code cache`
+  else if (name === 'GPUCache' || name === 'ShaderCache') title = `${browser} GPU cache`
+  else if (name === 'Crashpad') title = `${browser} crash reports`
+  else if (name === 'Cache') title = `${browser} cache`
+  else if (r.kind === 'backup') title = `Backup ${name}`
+  else title = name
+  const [why, look] = r.reason.split('; ')
+  const short = why.includes(': ') ? why.split(': ').pop() : why
+  const bullets = [short.charAt(0).toUpperCase() + short.slice(1)]
+  if (look) bullets.push(look.replace(/^it has/, 'Has').replace(/ \(then.*$/, ''))
+  if (r.mtime) bullets.push(`Last changed ${ago(r.mtime)}`)
+  return { title, bullets }
+}
+
+function IconTile({ kind, size = 36 }) {
+  return jsx('div', { style: { width: size, height: size, borderRadius: 9, flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    fontSize: size * 0.5, color: kindCss(kind), background: `color-mix(in srgb, ${kindCss(kind)} 16%, transparent)`, border: `1px solid color-mix(in srgb, ${kindCss(kind)} 30%, transparent)` },
+    children: KIND_GLYPH[kind] || KIND_GLYPH.other })
+}
+
+function CatalogCard({ icon, title, subtitle, label: lbl = 'What it is', bullets, badge, action, onAction, marked, extra }) {
+  return jsxs('div', {
+    style: { display: 'flex', flexDirection: 'column', background: C.panel, borderRadius: 12, padding: '14px 14px 12px', minHeight: 196,
+      border: marked ? `1.5px solid ${C.red}` : `1px solid ${C.stroke}`, transition: 'border-color .12s, transform .12s' },
+    onMouseEnter: (e) => { if (!marked) e.currentTarget.style.borderColor = 'var(--ui-text-quaternary, #6e7681)' },
+    onMouseLeave: (e) => { if (!marked) e.currentTarget.style.borderColor = '' },
+    children: [
+      jsxs('div', { style: { display: 'flex', gap: 10, alignItems: 'center' }, children: [
+        icon,
+        jsxs('div', { style: { minWidth: 0 }, children: [
+          jsx('div', { style: { fontSize: 15, fontWeight: 650, color: C.t1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, title, children: title }),
+          jsx('div', { style: { fontSize: 11.5, color: C.t3, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, title: subtitle, children: subtitle }),
+        ] }),
+      ] }),
+      jsx('div', { style: { fontSize: 11.5, fontWeight: 650, color: C.t2, marginTop: 12 }, children: lbl }),
+      jsx('ul', { style: { margin: '5px 0 0', paddingLeft: 16, fontSize: 12.5, lineHeight: 1.45, color: C.t2 }, children: bullets.map((b, i) => jsx('li', { style: { marginBottom: 2 }, children: b }, i)) }),
+      extra || null,
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', marginTop: 'auto', paddingTop: 10 }, children: [
+        badge ? jsx('span', { style: { fontSize: 11, color: badge.color }, children: badge.label }) : null,
+        jsx('button', { type: 'button', onClick: onAction, style: { marginLeft: 'auto', background: 'none', border: 0, color: C.t1, fontSize: 12.5, cursor: 'pointer', padding: '2px 0' },
+          children: `${action}  →` }),
+      ] }),
+    ] })
+}
+
+function CardsView({ items, marked, onReview, onTrashMarked, keptCount, onShowKept }) {
+  const total = items.reduce((a, r) => a + r.bytes, 0)
+  const markedItems = items.filter((r) => marked.has(r.path))
+  const pretty = { SAFE: 'Safe to trash', 'LOOK FIRST': 'Look first', CHECK: 'Check first' }
+  return jsxs('div', { style: { flex: 1, minHeight: 0, overflow: 'auto' }, children: [
+    jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }, children: [
+      jsx('div', { style: { fontSize: 13, color: C.t2 }, children: items.length ? `${items.length} things can go · ${fmt(total)}` : 'Nothing can go right now.' }),
+      keptCount ? jsx('button', { type: 'button', onClick: onShowKept, style: { background: 'none', border: 0, color: C.t3, fontSize: 12, cursor: 'pointer' }, children: `${keptCount} kept · show` }) : null,
+      items.length ? jsx('button', { type: 'button', onClick: () => onReview(0), style: btn({ marginLeft: 'auto', color: C.t1 }), children: 'Review all one by one' }) : null,
+      markedItems.length ? jsx('button', { type: 'button', onClick: onTrashMarked, style: btn({ background: C.red, color: '#fff', border: 0 }),
+        children: `Move ${markedItems.length} to Trash · ${fmt(markedItems.reduce((a, r) => a + r.bytes, 0))}` }) : null,
+    ] }),
+    jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 12 }, children: items.map((r, i) => {
+      const sf = safety(r)
+      const w = whatItIs(r)
+      return jsx(CatalogCard, { key: r.path, icon: jsx(IconTile, { kind: r.kind }), title: w.title,
+        subtitle: `${fmt(r.bytes)} · ${r.path.replace('~/.hermes/', '')}`, bullets: w.bullets,
+        badge: { label: marked.has(r.path) ? 'Marked for Trash' : pretty[sf.label], color: marked.has(r.path) ? C.red : sf.color },
+        action: 'Review', onAction: () => onReview(i), marked: marked.has(r.path) })
+    }) }),
+  ] })
 }
 
 function DiskBar({ disk, hermes, freeing }) {
@@ -523,32 +605,21 @@ function BotCards({ root, bots, onOpen }) {
   const profiles = (root.children || []).find((c) => c.name === 'profiles' && !c.rest)
   const cards = profiles ? (profiles.children || []).filter((c) => !c.rest && !c.file) : []
   const folderCount = (bot) => bots.folders.filter((f) => f.exists && f.bots[bot]).length
-  const max = Math.max(1, ...cards.map((c) => c.bytes))
-  return jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(272px, 1fr))', gap: 10, marginBottom: 12 }, children: cards.map((c) => {
+  return jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 12, marginBottom: 12 }, children: cards.map((c) => {
     const top = biggest(c)
     const can = []
     const walk = (x) => { if (x.reclaim) can.push(x); else (x.children || []).forEach(walk) }
     walk(c)
     const canBytes = can.reduce((a, x) => a + x.bytes, 0)
-    return jsxs('div', { key: c.name, onClick: () => onOpen(c), title: `Open ${c.name} in the treemap`,
-      style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 12, padding: 12, cursor: 'pointer', transition: 'transform .12s, border-color .12s' },
-      onMouseEnter: (e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.borderColor = 'var(--ui-accent, #4a84fe)' },
-      onMouseLeave: (e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.borderColor = '' },
-      children: [
-        jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }, children: [
-          jsx('span', { style: { fontSize: 15, fontWeight: 600, color: C.t1 }, children: c.name }),
-          jsx('span', { style: { marginLeft: 'auto', fontFamily: MONO, fontSize: 13, color: C.t1 }, children: fmt(c.bytes) }),
-        ] }),
-        jsx('div', { style: { height: 3, borderRadius: 2, background: C.stroke, marginBottom: 8 }, children: jsx('div', { style: { width: `${(100 * c.bytes) / max}%`, height: '100%', borderRadius: 2, background: C.accent } }) }),
-        jsx(MiniMap, { node: c }),
-        jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginTop: 9, fontSize: 10.5, color: C.t3 }, children: [
-          jsxs('div', { children: [jsx('div', { style: { fontSize: 15, color: C.t1, fontFamily: MONO }, children: bots.files.by_bot[c.name] || 0 }), 'files written'] }),
-          jsxs('div', { children: [jsx('div', { style: { fontSize: 15, color: C.t1, fontFamily: MONO }, children: folderCount(c.name) }), 'folders worked in'] }),
-          jsxs('div', { children: [jsx('div', { style: { fontSize: 15, color: canBytes ? C.yellow : C.t1, fontFamily: MONO }, children: canBytes ? fmt(canBytes) : '0' }), 'can go'] }),
-        ] }),
-        top ? jsxs('div', { style: { marginTop: 8, fontSize: 11, color: C.t3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: [
-          'Biggest: ', jsx('span', { style: { color: C.t2 }, children: top.path.replace(`profiles/${c.name}/`, '') }), ` · ${fmt(top.bytes)}`] }) : null,
-      ] })
+    const files = bots.files.by_bot[c.name] || 0, folders = folderCount(c.name)
+    return jsx(CatalogCard, { key: c.name, icon: jsx(IconTile, { kind: 'bot' }), title: c.name, subtitle: `Bot · ${fmt(c.bytes)}`, label: "What's in it",
+      bullets: [
+        files || folders ? `Wrote ${files} file${files === 1 ? '' : 's'}, worked in ${folders} folder${folders === 1 ? '' : 's'}` : 'No files written outside Hermes',
+        top ? `Biggest: ${top.path.replace(`profiles/${c.name}/`, '')} · ${fmt(top.bytes)}` : 'Nothing large',
+      ],
+      extra: jsx('div', { style: { marginTop: 8 }, children: jsx(MiniMap, { node: c, w: 220, h: 54 }) }),
+      badge: canBytes ? { label: `${fmt(canBytes)} can go`, color: C.yellow } : { label: 'Nothing to clean', color: C.green },
+      action: 'Open in treemap', onAction: () => onOpen(c) })
   }) })
 }
 
@@ -635,12 +706,15 @@ function FootprintPage() {
     head,
     jsxs('div', { style: { display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }, children: [
       tabBtn('hermes', `Hermes itself · ${fmt(d.hermes.bytes)}`),
+      tabBtn('cards', `Can go · ${open.length}`),
       tabBtn('bots', `Made by your Bots · ${d.bots.files.written} files`),
       tab === 'hermes' ? jsx('div', { style: { marginLeft: 12, fontSize: 12, color: C.t3, display: 'flex', gap: 4, flexWrap: 'wrap' }, children: trail.map((n, i) => jsxs('span', { key: n.fullPath, children: [
         i ? ' / ' : '',
         jsx('button', { type: 'button', onClick: () => setZoom(n.path), style: { background: 'none', border: 0, padding: 0, cursor: 'pointer', color: i === trail.length - 1 ? C.t1 : C.accent, fontSize: 12 }, children: n.name }),
       ] })) }) : null,
     ] }),
+    tab === 'cards' ? jsx(CardsView, { items: showKept ? d.reclaimable : open, marked, keptCount: d.reclaimable.length - open.length,
+      onShowKept: () => setShowKept((v) => !v), onReview: (i) => setDeck({ start: i }), onTrashMarked: () => setReview(true) }) :
     tab === 'bots' ? jsx(BotsView, { bots: d.bots, root, onOpen: (n) => { setZoom(n.path); setTab('hermes') } }) : jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 12, flex: 1, minHeight: 0 }, children: [
       jsxs('div', { style: { display: 'flex', flexDirection: 'column', minHeight: 0 }, children: [
         jsx(Treemap, { root: here, marked, onOpen: (n) => setZoom(n.path), onToggle: toggle }),
@@ -655,11 +729,11 @@ function FootprintPage() {
         ] }),
       ] }),
       jsx('div', { style: { overflow: 'auto', minHeight: 0 }, children: jsx(WorthALook, { items: showKept ? d.reclaimable : open, marked, onToggle: toggle, onReview: () => setReview(true),
-        onDeck: () => setDeck(true), keptCount: d.reclaimable.length - open.length, onShowKept: () => setShowKept((v) => !v) }) }),
+        onDeck: () => setDeck({ start: 0 }), keptCount: d.reclaimable.length - open.length, onShowKept: () => setShowKept((v) => !v) }) }),
     ] }),
-    deck ? jsx(Deck, { items: open, onCancel: () => setDeck(false), onDone: (trash, keep) => {
+    deck ? jsx(Deck, { items: showKept ? d.reclaimable : open, start: deck.start || 0, onCancel: () => setDeck(false), onDone: (trash, keep) => {
       const k = new Set(kept); keep.forEach((x) => k.add(x.path)); setKept(k); saveKept(k)
-      setMarked(new Set(trash.map((x) => x.path))); setDeck(false); if (trash.length) setReview(true)
+      setMarked((m) => { const n = new Set(m); trash.forEach((x) => n.add(x.path)); keep.forEach((x) => n.delete(x.path)); return n }); setDeck(false); if (trash.length) setReview(true)
     } }) : null,
     jsx('style', { children: '@keyframes fpIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}' }),
     review ? jsx(Review, { items: d.reclaimable.filter((r) => marked.has(r.path)), onCancel: () => setReview(false), onDone: () => { setReview(false); setMarked(new Set()) } }) : null,
