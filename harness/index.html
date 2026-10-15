@@ -29,5 +29,7 @@ const key = (k) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k })
 const steps = { cards: [() => click(/^Can go/)], bots: [() => click(/^Made by your Bots/)], deck: [() => click(/^Review one by one/)],
   'deck-end': [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t')],
   confirm: [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => click(/^Next: confirm/)] }
-if (view && steps[view]) { try { localStorage.clear() } catch {}; steps[view].forEach((f, i) => setTimeout(f, 1500 + i * 120)) }
+// Wait until the page has its data (the tabs exist), then click through.
+const ready = () => new Promise((res) => { const t = setInterval(() => { if ([...document.querySelectorAll('button')].some((b) => /^Hermes itself/.test(b.textContent))) { clearInterval(t); res() } }, 100) })
+if (view && steps[view]) { try { localStorage.clear() } catch {}; ready().then(() => steps[view].forEach((f, i) => setTimeout(f, 200 + i * 120))) }
 </script></body></html>

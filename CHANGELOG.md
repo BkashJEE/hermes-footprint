@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 — 2026-10-15
+- Can go tab: catalog-style cards with the size as the hero, its share of what can go, SAFE / LOOK FIRST, and Keep / Trash on the card. A summary card comes first.
+- Git-aware worktrees: branch or detached commit, last commit, changed and untracked files, commits on no remote, and stashes in the main repo. Any risk makes the card LOOK FIRST.
+- ✦ Hand to a Bot: drafts a removal job in Hermes chat for the marked items, with each tool's own clean command pointed at that exact folder. It checks first and asks before acting; nothing is sent.
+- Live scan progress (files, folder, phase) and Stop. A stopped scan keeps the last result.
+- Bot cards in the same catalog style.
+- Always runs on a local profile where the plugin is enabled (it was failing when Desktop's primary profile didn't have it). Never runs on a remote connection.
+- Scan failures go to Desktop's log.
+
 ## 0.2.0 — 2026-10-15
 - Review deck: one card per item, Keep (K) or Trash (T), SAFE / LOOK FIRST badges, a summary, then one confirm. Kept items stay off the list.
 - Bot cards: a mini treemap per Bot, with files written, folders worked in, what can go and the biggest item.

@@ -103,6 +103,47 @@ class FootprintTest(unittest.TestCase):
         self.assertEqual(len(opened), 1)
         self.assertTrue(opened[0][-1].endswith("/cache/uv"))
 
+    def test_git_details_for_a_worktree(self):
+        import subprocess
+        repo = self.root / "worktrees" / "gitwt"
+        repo.mkdir(parents=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=True)
+        run("init", "-q"); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (repo / "a.txt").write_text("a"); run("add", "a.txt"); run("commit", "-qm", "one")
+        (repo / "a.txt").write_text("changed"); (repo / "new.txt").write_text("n")
+        g = fd.git_info(str(repo))
+        self.assertEqual((g["changed"], g["untracked"], g["unpushed"]), (1, 1, 1))  # no remote: the commit exists only here
+        self.assertTrue(g["branch"])
+        for d, _, fs in os.walk(repo):
+            for x in fs + [""]:
+                os.utime(os.path.join(d, x) if x else d, (OLD, OLD))
+        rec = {r["path"]: r for r in self.scan()["reclaimable"]}
+        r = rec["~/.hermes/worktrees/gitwt"]
+        self.assertIn("1 commit(s) on no remote", r["reason"])
+        self.assertIn("look first", r["reason"])
+        self.assertEqual(r["git"]["unpushed"], 1)
+
+    def test_progress_and_stop(self):
+        prog = fd.Progress(self.root)
+        prog.update(force=True, files=10, where="cache")
+        p = fd.read_progress(self.root)
+        self.assertTrue(p["running"]); self.assertEqual(p["files"], 10)
+        fd.request_stop(self.root)
+        with self.assertRaises(fd.Stopped):
+            prog.update(force=True)
+        prog.finish(0, stopped=True)
+        self.assertEqual(fd.read_progress(self.root), {"running": False, "stopped": True})
+        self.assertFalse((self.root / "plugin-data/hermes-footprint/stop").exists())
+
+    def test_stop_during_a_scan_returns_stopped(self):
+        fd.request_stop(self.root)
+        real = fd.Progress.__init__
+        def keep_flag(selfp, root):
+            real(selfp, root); selfp.stop_flag.touch()   # the user presses Stop right after the scan starts
+        with mock.patch.object(fd.Progress, "__init__", keep_flag), \
+             mock.patch.object(fd, "bot_work", return_value={"folders": [], "files": {}}):
+            self.assertEqual(fd.collect(self.root, report=True), {"stopped": True})
+
     def test_payload_has_no_private_fields(self):
         import json
         s = json.dumps(self.scan())
