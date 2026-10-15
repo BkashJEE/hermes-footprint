@@ -356,3 +356,25 @@ def trash(paths: list[str], root: Path | None = None) -> dict:
                         "why": None if run.returncode == 0 else (run.stderr.strip().splitlines() or ["failed"])[-1]})
     return {"results": results, "freed_bytes": sum(r.get("bytes", 0) for r in results if r["ok"]),
             "free_after": shutil.disk_usage(str(root)).free}
+
+
+def open_folder(path: str, root: Path | None = None) -> dict:
+    """Show a folder in the desktop file manager. Only inside ~/.hermes or a Bot work folder; a
+    file opens its folder. Uses the desktop's own opener (gio open / xdg-open), never a shell."""
+    root = Path(root) if root else hermes_root()
+    real = Path(str(root) + path[len("~/.hermes"):]) if path.startswith("~/.hermes") else Path(os.path.expanduser(path))
+    real = real if real.is_dir() else real.parent
+    try:
+        real = real.resolve(strict=True)
+    except OSError:
+        return {"ok": False, "why": "not found"}
+    allowed = [root.resolve()]
+    if not str(real).startswith(str(allowed[0])):
+        folders = {os.path.realpath(os.path.expanduser(f["path"])) for f in bot_work(root, Path.home())["folders"] if f["exists"]}
+        if not any(str(real) == f or str(real).startswith(f + "/") for f in folders):
+            return {"ok": False, "why": "only folders inside ~/.hermes or a Bot work folder"}
+    tool = shutil.which("gio") and ["gio", "open"] or shutil.which("xdg-open") and ["xdg-open"]
+    if not tool:
+        return {"ok": False, "why": "no gio or xdg-open"}
+    subprocess.Popen(tool + [str(real)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return {"ok": True, "path": str(real)}

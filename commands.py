@@ -70,7 +70,7 @@ def slash_command(raw_args: str) -> str:
 
 
 def setup_argparse(subparser) -> None:
-    subparser.add_argument("action", nargs="?", choices=["scan", "trash", "part"], default="scan")
+    subparser.add_argument("action", nargs="?", choices=["scan", "trash", "part", "open"], default="scan")
     subparser.add_argument("paths", nargs="*", help="With trash: ~/.hermes/... paths the scan marked reclaimable")
     subparser.add_argument("--json", action="store_true", help="Emit JSON for the desktop page")
     subparser.set_defaults(func=handle_cli)
@@ -81,6 +81,8 @@ def handle_cli(args) -> None:
         action = getattr(args, "action", "scan")
         if action == "trash":
             payload = data.trash(list(getattr(args, "paths", []) or []))
+        elif action == "open":
+            payload = data.open_folder((getattr(args, "paths", None) or [""])[0])
         elif action == "part":
             payload = part_payload(int((getattr(args, "paths", None) or ["0"])[0]))
         elif getattr(args, "json", False):

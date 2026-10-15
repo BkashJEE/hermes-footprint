@@ -304,6 +304,93 @@ function kindTotals(n, acc = {}) {
 const btn = (extra) => ({ fontSize: 12, padding: '4px 11px', borderRadius: 6, border: `1px solid ${C.stroke}`, background: 'transparent', color: C.t2, cursor: 'pointer', ...extra })
 const label = { fontSize: 10.5, letterSpacing: '.09em', color: C.t3, textTransform: 'uppercase' }
 
+// ── actions: Ask a Bot, Open, Copy ──────────────────────────────────────────
+const COMPOSER_INSERT = 'hermes:composer-insert'
+const COMPOSER_FOCUS = 'hermes:composer-focus'
+// Puts a draft in the chat box (never sends it), the same events core and GitHermes use.
+function askBot(item) {
+  const text = `Footprint shows \`${item.path}\` using ${fmt(item.bytes)} (${store.data?.kinds?.[item.kind] || item.kind}).` +
+    (item.reason ? ` Footprint's reason: ${item.reason}.` : '') +
+    ' What is it, what made it, and is it safe to remove? Look only; do not delete or move anything.'
+  host.navigate('/')
+  window.setTimeout(() => {
+    window.dispatchEvent(new CustomEvent(COMPOSER_INSERT, { detail: { mode: 'block', target: 'main', text } }))
+    window.dispatchEvent(new CustomEvent(COMPOSER_FOCUS, { detail: { target: 'main' } }))
+  }, 250)
+}
+function copyPath(p) { try { navigator.clipboard.writeText(p) } catch { /* no clipboard */ } }
+function openFolder(p) { return runFootprint(['open', p]).catch(() => null) }
+const KEPT_KEY = 'hermes-footprint.kept'
+function loadKept() { try { return new Set(JSON.parse(localStorage.getItem(KEPT_KEY) || '[]')) } catch { return new Set() } }
+function saveKept(set) { try { localStorage.setItem(KEPT_KEY, JSON.stringify([...set])) } catch { /* private mode */ } }
+const safety = (r) => /look first/.test(r.reason) ? { label: 'LOOK FIRST', color: C.yellow } : /rebuilt|reinstallable/.test(r.reason) ? { label: 'SAFE', color: C.green } : { label: 'CHECK', color: C.t2 }
+
+function ActionRow({ item, compact }) {
+  const [copied, setCopied] = useState(false)
+  const b = btn({ fontSize: compact ? 10.5 : 11.5, padding: compact ? '1px 7px' : '4px 10px' })
+  return jsxs('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' }, onClick: (e) => e.stopPropagation(), children: [
+    jsx('button', { type: 'button', style: b, title: 'Draft a question to the Bot in chat (not sent)', onClick: () => askBot(item), children: '✦ Ask a Bot' }),
+    jsx('button', { type: 'button', style: b, title: 'Show in the file manager', onClick: () => openFolder(item.path), children: 'Open' }),
+    jsx('button', { type: 'button', style: b, onClick: () => { copyPath(item.path); setCopied(true); setTimeout(() => setCopied(false), 1200) }, children: copied ? 'Copied' : 'Copy path' }),
+  ] })
+}
+
+// One card at a time: Keep (K) or Trash (T). Trash only marks; the Trash step still asks once more.
+function Deck({ items, onDone, onCancel }) {
+  const [i, setI] = useState(0)
+  const [picks, setPicks] = useState({})
+  const r = items[i]
+  const decide = (choice) => { setPicks((p) => ({ ...p, [r.path]: choice })); setI((n) => n + 1) }
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!r) return
+      if (e.key === 'k' || e.key === 'K' || e.key === 'ArrowLeft') decide('keep')
+      else if (e.key === 't' || e.key === 'T' || e.key === 'ArrowRight') decide('trash')
+      else if (e.key === 'Escape') onCancel()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+  const trash = items.filter((x) => picks[x.path] === 'trash'), keep = items.filter((x) => picks[x.path] === 'keep')
+  const shell = (children) => jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.78)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 }, children })
+  if (!r) {
+    const freed = trash.reduce((a, x) => a + x.bytes, 0)
+    return shell(jsxs('div', { style: { width: 'min(460px, 92%)', background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 14, padding: 22, textAlign: 'center' }, children: [
+      jsx('div', { style: { ...label, marginBottom: 8 }, children: 'Review done' }),
+      jsx('div', { style: { fontSize: 34, fontWeight: 650, color: trash.length ? C.green : C.t1 }, children: fmt(freed) }),
+      jsx('div', { style: { fontSize: 12.5, color: C.t3, marginTop: 4 }, children: `${trash.length} to Trash · ${keep.length} kept (they stay off this list)` }),
+      jsxs('div', { style: { display: 'flex', gap: 8, justifyContent: 'center', marginTop: 18 }, children: [
+        jsx('button', { type: 'button', onClick: onCancel, style: btn(), children: 'Cancel' }),
+        jsx('button', { type: 'button', onClick: () => onDone(trash, keep), style: btn({ background: trash.length ? C.red : C.accent, color: '#fff', border: 0, padding: '6px 14px' }),
+          children: trash.length ? `Next: confirm ${trash.length} for Trash` : 'Save and close' }),
+      ] }),
+    ] }))
+  }
+  const sf = safety(r)
+  return shell(jsxs('div', { style: { width: 'min(520px, 92%)' }, children: [
+    jsx('div', { style: { display: 'flex', gap: 4, marginBottom: 10 }, children: items.map((x, k) => jsx('div', { key: x.path, style: { flex: 1, height: 3, borderRadius: 2,
+      background: k < i ? (picks[x.path] === 'trash' ? C.red : C.green) : k === i ? C.t1 : C.stroke } })) }),
+    jsxs('div', { key: r.path, style: { position: 'relative', background: C.panel, border: `1px solid ${C.stroke}`, borderTop: `3px solid ${kindCss(r.kind)}`, borderRadius: 14, padding: '18px 20px',
+      boxShadow: '0 24px 60px rgba(0,0,0,.55)', animation: 'fpIn .18s ease-out' }, children: [
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 8 }, children: [
+        jsx('span', { style: { fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', color: sf.color, border: `1px solid ${sf.color}`, borderRadius: 5, padding: '1px 6px' }, children: sf.label }),
+        jsx('span', { style: { fontSize: 11.5, color: kindCss(r.kind) }, children: store.data?.kinds?.[r.kind] || r.kind }),
+        jsx('span', { style: { marginLeft: 'auto', fontSize: 11, color: C.t4 }, children: `${i + 1} of ${items.length}` }),
+      ] }),
+      jsx('div', { style: { fontSize: 44, fontWeight: 650, color: C.t1, margin: '10px 0 2px', fontFamily: MONO, letterSpacing: '-.02em' }, children: fmt(r.bytes) }),
+      jsx('div', { style: { fontSize: 13, color: C.t1, wordBreak: 'break-all' }, children: r.path }),
+      jsx('div', { style: { fontSize: 12.5, color: sf.color === C.yellow ? C.yellow : C.t2, marginTop: 8, lineHeight: 1.45 }, children: r.reason }),
+      r.mtime ? jsx('div', { style: { fontSize: 11.5, color: C.t3, marginTop: 4 }, children: `Last changed ${ago(r.mtime)}` }) : null,
+      jsx('div', { style: { marginTop: 14 }, children: jsx(ActionRow, { item: r }) }),
+      jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 16 }, children: [
+        jsx('button', { type: 'button', onClick: () => decide('keep'), style: btn({ padding: '10px 0', fontSize: 13, color: C.t1 }), children: 'Keep  ·  K' }),
+        jsx('button', { type: 'button', onClick: () => decide('trash'), style: btn({ padding: '10px 0', fontSize: 13, color: '#fff', background: C.red, border: 0 }), children: 'Trash  ·  T' }),
+      ] }),
+    ] }),
+    jsx('div', { style: { textAlign: 'center', fontSize: 11, color: C.t4, marginTop: 10 }, children: 'Nothing moves until you confirm at the end. Esc to stop.' }),
+  ] }))
+}
+
 function DiskBar({ disk, hermes, freeing }) {
   const pct = (b) => `${Math.max(0.4, (100 * b) / disk.total)}%`
   return jsxs('div', { style: { minWidth: 260, flex: 1, maxWidth: 520 }, children: [
@@ -320,12 +407,15 @@ function DiskBar({ disk, hermes, freeing }) {
   ] })
 }
 
-function WorthALook({ items, marked, onToggle, onReview }) {
+function WorthALook({ items, marked, onToggle, onReview, onDeck, keptCount, onShowKept }) {
   const total = items.filter((r) => marked.has(r.path)).reduce((s, r) => s + r.bytes, 0)
   return jsxs('div', { style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 10, padding: '10px 12px' }, children: [
     jsxs('div', { style: { display: 'flex', alignItems: 'center' }, children: [
       jsx('div', { style: label, children: `Worth a look · ${fmt(items.reduce((s, r) => s + r.bytes, 0))}` }),
+      keptCount ? jsx('button', { type: 'button', onClick: onShowKept, style: { marginLeft: 'auto', background: 'none', border: 0, color: C.t3, fontSize: 11, cursor: 'pointer' }, children: `${keptCount} kept · show` }) : null,
     ] }),
+    items.length ? jsx('button', { type: 'button', onClick: onDeck, style: btn({ width: '100%', margin: '8px 0 4px', padding: '8px 0', color: C.t1, background: 'color-mix(in srgb, var(--ui-accent, #4a84fe) 18%, transparent)', borderColor: C.accent }),
+      children: `Review one by one · ${items.length} card${items.length > 1 ? 's' : ''}` }) : null,
     items.length ? items.map((r) => {
       const on = marked.has(r.path)
       return jsxs('label', { key: r.path, style: { display: 'flex', gap: 8, padding: '7px 0', borderBottom: `1px solid ${C.stroke}`, cursor: 'pointer', alignItems: 'flex-start' }, children: [
@@ -337,6 +427,7 @@ function WorthALook({ items, marked, onToggle, onReview }) {
             jsx('span', { style: { marginLeft: 'auto', fontSize: 11.5, color: C.t2, fontFamily: MONO, flex: 'none' }, children: fmt(r.bytes) }),
           ] }),
           jsx('div', { style: { fontSize: 11, color: /look first/.test(r.reason) ? C.yellow : C.t3, marginTop: 2 }, children: r.reason }),
+          jsx('div', { style: { marginTop: 5 }, children: jsx(ActionRow, { item: r, compact: true }) }),
         ] }),
       ] })
     }) : jsx('div', { style: { fontSize: 12, color: C.green, padding: '8px 0' }, children: 'Nothing to reclaim. Hermes is tidy.' }),
@@ -383,14 +474,79 @@ function Review({ items, onCancel, onDone }) {
     ] }) })
 }
 
-function BotsView({ bots }) {
+// A small, label-free treemap: the card's "art", drawn from the Bot's real folder.
+function MiniMap({ node, w = 248, h = 92 }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const cv = ref.current
+    if (!cv) return
+    const dpr = window.devicePixelRatio || 1
+    cv.width = w * dpr; cv.height = h * dpr
+    const g = cv.getContext('2d')
+    g.setTransform(dpr, 0, 0, dpr, 0, 0)
+    const bg = cssColor('--ui-bg-elevated', '#010409')
+    g.fillStyle = bg; g.fillRect(0, 0, w, h)
+    for (const t of layout(node, 0, 0, w, h, 0, 1, [])) {
+      if (t.header) continue
+      const col = kindColor(t.node.kind)
+      g.globalAlpha = t.node.rest ? 0.18 : 0.55; g.fillStyle = col; g.fillRect(t.x + 0.5, t.y + 0.5, Math.max(0, t.w - 1), Math.max(0, t.h - 1))
+      g.globalAlpha = 0.9; g.strokeStyle = bg; g.lineWidth = 1; g.strokeRect(t.x + 0.5, t.y + 0.5, Math.max(0, t.w - 1), Math.max(0, t.h - 1))
+    }
+    g.globalAlpha = 1
+  }, [node, w, h])
+  return jsx('canvas', { ref, style: { width: w, height: h, display: 'block', borderRadius: 6 } })
+}
+
+function biggest(n) {
+  let best = null
+  const go = (x) => { for (const c of x.children || []) { if (c.rest) continue; if (!c.children || c.reclaim) { if (!best || c.bytes > best.bytes) best = c } else go(c) } }
+  go(n)
+  return best
+}
+
+function BotCards({ root, bots, onOpen }) {
+  const profiles = (root.children || []).find((c) => c.name === 'profiles' && !c.rest)
+  const cards = profiles ? (profiles.children || []).filter((c) => !c.rest && !c.file) : []
+  const folderCount = (bot) => bots.folders.filter((f) => f.exists && f.bots[bot]).length
+  const max = Math.max(1, ...cards.map((c) => c.bytes))
+  return jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(272px, 1fr))', gap: 10, marginBottom: 12 }, children: cards.map((c) => {
+    const top = biggest(c)
+    const can = []
+    const walk = (x) => { if (x.reclaim) can.push(x); else (x.children || []).forEach(walk) }
+    walk(c)
+    const canBytes = can.reduce((a, x) => a + x.bytes, 0)
+    return jsxs('div', { key: c.name, onClick: () => onOpen(c), title: `Open ${c.name} in the treemap`,
+      style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 12, padding: 12, cursor: 'pointer', transition: 'transform .12s, border-color .12s' },
+      onMouseEnter: (e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.borderColor = 'var(--ui-accent, #4a84fe)' },
+      onMouseLeave: (e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.borderColor = '' },
+      children: [
+        jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8 }, children: [
+          jsx('span', { style: { fontSize: 15, fontWeight: 600, color: C.t1 }, children: c.name }),
+          jsx('span', { style: { marginLeft: 'auto', fontFamily: MONO, fontSize: 13, color: C.t1 }, children: fmt(c.bytes) }),
+        ] }),
+        jsx('div', { style: { height: 3, borderRadius: 2, background: C.stroke, marginBottom: 8 }, children: jsx('div', { style: { width: `${(100 * c.bytes) / max}%`, height: '100%', borderRadius: 2, background: C.accent } }) }),
+        jsx(MiniMap, { node: c }),
+        jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, marginTop: 9, fontSize: 10.5, color: C.t3 }, children: [
+          jsxs('div', { children: [jsx('div', { style: { fontSize: 15, color: C.t1, fontFamily: MONO }, children: bots.files.by_bot[c.name] || 0 }), 'files written'] }),
+          jsxs('div', { children: [jsx('div', { style: { fontSize: 15, color: C.t1, fontFamily: MONO }, children: folderCount(c.name) }), 'folders worked in'] }),
+          jsxs('div', { children: [jsx('div', { style: { fontSize: 15, color: canBytes ? C.yellow : C.t1, fontFamily: MONO }, children: canBytes ? fmt(canBytes) : '0' }), 'can go'] }),
+        ] }),
+        top ? jsxs('div', { style: { marginTop: 8, fontSize: 11, color: C.t3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, children: [
+          'Biggest: ', jsx('span', { style: { color: C.t2 }, children: top.path.replace(`profiles/${c.name}/`, '') }), ` · ${fmt(top.bytes)}`] }) : null,
+      ] })
+  }) })
+}
+
+function BotsView({ bots, root, onOpen }) {
   const f = bots.files
   const max = Math.max(1, ...Object.values(f.by_bot))
   const [showGone, setShowGone] = useState(false)
   const gone = bots.folders.filter((r) => !r.exists).length
   const folders = showGone ? bots.folders : bots.folders.filter((r) => r.exists)
-  return jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 280px', gap: 12, flex: 1, minHeight: 0 }, children: [
-    jsxs('div', { style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 10, padding: '10px 12px', overflow: 'auto' }, children: [
+  return jsxs('div', { style: { flex: 1, minHeight: 0, overflow: 'auto' }, children: [
+    jsx(BotCards, { root, bots, onOpen }),
+    jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 280px', gap: 12 }, children: [
+    jsxs('div', { style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 10, padding: '10px 12px' }, children: [
       jsxs('div', { style: { display: 'flex', alignItems: 'center' }, children: [
         jsx('div', { style: label, children: `Folders your Bots worked in · ${bots.folders.length - gone}` }),
         gone ? jsx('button', { type: 'button', onClick: () => setShowGone((v) => !v), style: btn({ marginLeft: 'auto', fontSize: 11, padding: '2px 9px' }),
@@ -419,6 +575,7 @@ function BotsView({ bots }) {
       ] })) }),
       jsx('div', { style: { fontSize: 10.5, color: C.t4, marginTop: 10 }, children: 'From each Bot\'s own sessions: the folder it started in and every write_file / patch. Shown for knowing, never offered for removal.' }),
     ] }),
+  ] }),
   ] })
 }
 
@@ -428,6 +585,9 @@ function FootprintPage() {
   const [zoom, setZoom] = useState('')
   const [marked, setMarked] = useState(() => new Set())
   const [review, setReview] = useState(false)
+  const [deck, setDeck] = useState(false)
+  const [kept, setKept] = useState(loadKept)
+  const [showKept, setShowKept] = useState(false)
   const d = s.data
   const root = useMemo(() => d ? withFullPaths(d.hermes, '~/.hermes') : null, [d])
   const totals = useMemo(() => root ? Object.entries(kindTotals(root)).sort((a, b) => b[1] - a[1]) : [], [root])
@@ -450,6 +610,7 @@ function FootprintPage() {
     return jsxs('div', { style: { padding: '16px 22px', height: '100%', overflow: 'auto' }, children: [head,
       s.error ? jsx('div', { style: { color: C.red, fontSize: 12.5 }, children: `Could not read your footprint: ${s.error}. Is the hermes-footprint Python plugin enabled (plugins.enabled in config.yaml)?` }) : null] })
   }
+  const open = d.reclaimable.filter((r) => !kept.has(r.path))
   const trail = findPath(root, zoom)
   const here = trail[trail.length - 1]
   const tabBtn = (id, text) => jsx('button', { type: 'button', onClick: () => setTab(id),
@@ -465,7 +626,7 @@ function FootprintPage() {
         jsx('button', { type: 'button', onClick: () => setZoom(n.path), style: { background: 'none', border: 0, padding: 0, cursor: 'pointer', color: i === trail.length - 1 ? C.t1 : C.accent, fontSize: 12 }, children: n.name }),
       ] })) }) : null,
     ] }),
-    tab === 'bots' ? jsx(BotsView, { bots: d.bots }) : jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 12, flex: 1, minHeight: 0 }, children: [
+    tab === 'bots' ? jsx(BotsView, { bots: d.bots, root, onOpen: (n) => { setZoom(n.path); setTab('hermes') } }) : jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 12, flex: 1, minHeight: 0 }, children: [
       jsxs('div', { style: { display: 'flex', flexDirection: 'column', minHeight: 0 }, children: [
         jsx(Treemap, { root: here, marked, onOpen: (n) => setZoom(n.path), onToggle: toggle }),
         jsx('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px 14px', marginTop: 8, fontSize: 11, color: C.t3 }, children: [
@@ -478,8 +639,14 @@ function FootprintPage() {
           ] }),
         ] }),
       ] }),
-      jsx('div', { style: { overflow: 'auto', minHeight: 0 }, children: jsx(WorthALook, { items: d.reclaimable, marked, onToggle: toggle, onReview: () => setReview(true) }) }),
+      jsx('div', { style: { overflow: 'auto', minHeight: 0 }, children: jsx(WorthALook, { items: showKept ? d.reclaimable : open, marked, onToggle: toggle, onReview: () => setReview(true),
+        onDeck: () => setDeck(true), keptCount: d.reclaimable.length - open.length, onShowKept: () => setShowKept((v) => !v) }) }),
     ] }),
+    deck ? jsx(Deck, { items: open, onCancel: () => setDeck(false), onDone: (trash, keep) => {
+      const k = new Set(kept); keep.forEach((x) => k.add(x.path)); setKept(k); saveKept(k)
+      setMarked(new Set(trash.map((x) => x.path))); setDeck(false); if (trash.length) setReview(true)
+    } }) : null,
+    jsx('style', { children: '@keyframes fpIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}' }),
     review ? jsx(Review, { items: d.reclaimable.filter((r) => marked.has(r.path)), onCancel: () => setReview(false), onDone: () => { setReview(false); setMarked(new Set()) } }) : null,
   ] })
 }

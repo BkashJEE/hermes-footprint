@@ -93,6 +93,16 @@ class FootprintTest(unittest.TestCase):
         trash_calls = [c for c in calls if c[:2] == ["gio", "trash"]]
         self.assertEqual(trash_calls, [["gio", "trash", "--", str(self.root / "cache/uv")]])
 
+    def test_open_only_inside_hermes(self):
+        opened = []
+        with mock.patch.object(fd.subprocess, "Popen", side_effect=lambda cmd, **k: opened.append(cmd)), \
+             mock.patch.object(fd, "bot_work", return_value={"folders": [], "files": {}}):
+            self.assertTrue(fd.open_folder("~/.hermes/cache/uv/wheel.whl", self.root)["ok"])   # a file opens its folder
+            self.assertFalse(fd.open_folder("/etc", self.root)["ok"])
+            self.assertFalse(fd.open_folder("~/.hermes/../../etc", self.root)["ok"])
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(opened[0][-1].endswith("/cache/uv"))
+
     def test_payload_has_no_private_fields(self):
         import json
         s = json.dumps(self.scan())

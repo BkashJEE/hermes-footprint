@@ -8,6 +8,7 @@ export const host = {
   profileRoutes: async () => [{ connectionId: 'local', mode: 'local', primary: true, profile: 'ceo', targetProfile: 'ceo' }],
   requestProfile: async (route, method, params) => {
     window.__calls = (window.__calls || []).concat([{ method, argv: params.argv }])
+    if (params.argv.includes('open')) return { code: 0, output: JSON.stringify({ ok: true, path: params.argv[params.argv.indexOf('open') + 1] }) }
     const i = params.argv.indexOf('trash')
     if (i >= 0) {
       const paths = params.argv.slice(i + 1, -1)
