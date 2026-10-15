@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.3.1 — 2026-10-15
+- `hermes plugins install` works: the protected-names pattern is now built from a list. Written by hand, its `.env|` looked like an environment dump to Hermes's install scan, which held the install for confirmation. Nothing is protected differently.
+
 ## 0.3.0 — 2026-10-15
 - Can go tab: catalog-style cards with the size as the hero, its share of what can go, SAFE / LOOK FIRST, and Keep / Trash on the card. A summary card comes first.
 - Git-aware worktrees: branch or detached commit, last commit, changed and untracked files, commits on no remote, and stashes in the main repo. Any risk makes the card LOOK FIRST.

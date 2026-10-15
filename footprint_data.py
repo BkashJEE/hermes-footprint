@@ -54,8 +54,9 @@ KINDS = {
     "cache": "Caches & logs", "other": "Other", "workspace": "Made by your Bots",
 }
 # Never offered for removal, whatever the rules say: what a Bot needs to run.
-PROTECTED = re.compile(r"(^|/)(state\.db[^/]*|memories|skills|plugins|desktop-plugins|config\.yaml|auth\.json|auth\.lock|\.env|"
-                       r"profile\.yaml|SOUL\.md|cron|hermes-agent)(/|$)")
+PROTECTED_NAMES = ["memories", "skills", "plugins", "desktop-plugins", "config.yaml", "auth.json", "auth.lock", ".env",
+                   "profile.yaml", "SOUL.md", "cron", "hermes-agent"]
+PROTECTED = re.compile(r"(^|/)(state\.db[^/]*|" + "|".join(map(re.escape, PROTECTED_NAMES)) + r")(/|$)")
 
 
 def hermes_root() -> Path:
