@@ -32,7 +32,31 @@ function parseCliJson(output) {
     if (!lines[i].startsWith('{')) continue
     try { return JSON.parse(lines[i]) } catch { /* keep looking */ }
   }
-  throw new Error(lines.slice(-2).join(' ') || 'empty output from hermes footprint')
+  const last = lines.slice(-2).join(' ')
+  throw new Error(last ? `unreadable output from hermes footprint (${last.length > 160 ? `${last.slice(0, 160)}…` : last})` : 'empty output from hermes footprint')
+}
+
+// cli.exec returns at most 48,000 characters, so a big scan arrives as base64 parts.
+function b64Bytes(s) { const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out }
+async function joinParts(first) {
+  const rest = []
+  for (let i = 1; i < first.parts; i++) rest.push(i)
+  const got = [first]
+  for (let k = 0; k < rest.length; k += 4) { // four processes at a time
+    const batch = await Promise.all(rest.slice(k, k + 4).map((i) => runFootprint(['part', String(i)])))
+    got.push(...batch)
+  }
+  if (got.some((p) => p.id !== first.id)) throw new Error('scan changed while loading; press Rescan')
+  got.sort((a, b) => a.part - b.part)
+  const chunks = got.map((p) => b64Bytes(p.data))
+  const all = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
+  let at = 0
+  for (const c of chunks) { all.set(c, at); at += c.length }
+  return JSON.parse(new TextDecoder().decode(all))
+}
+async function scan() {
+  const first = await runFootprint([])
+  return first.parts ? joinParts(first) : first
 }
 
 async function runFootprint(args) {
@@ -50,7 +74,7 @@ const store = { data: null, error: null, at: 0, listeners: new Set(), inflight: 
 function notify() { store.listeners.forEach((fn) => fn()) }
 function rescan() {
   if (store.inflight) return store.inflight
-  store.inflight = runFootprint([])
+  store.inflight = scan()
     .then((d) => { store.data = d; store.error = null; store.at = Date.now() })
     .catch((e) => { store.error = String(e && e.message || e) })
     .finally(() => { store.inflight = null; notify() })
@@ -262,9 +286,12 @@ function Treemap({ root, marked, onOpen, onToggle }) {
 }
 
 // Paths in the payload are relative to ~/.hermes; give every node its full display path once.
-function withFullPaths(n, prefix) {
+// The payload carries names only; rebuild each node's path (relative to ~/.hermes) from its parents.
+function withFullPaths(n, prefix, parentPath = null) {
+  if (parentPath === null) n.path = ''
+  else n.path = n.rest ? parentPath : parentPath ? `${parentPath}/${n.name}` : n.name
   n.fullPath = n.path ? `${prefix}/${n.path}` : prefix
-  for (const c of n.children || []) withFullPaths(c, prefix)
+  for (const c of n.children || []) withFullPaths(c, prefix, n.path)
   return n
 }
 function kindTotals(n, acc = {}) {

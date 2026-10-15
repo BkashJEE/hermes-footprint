@@ -203,6 +203,17 @@ def shape(node: dict, rel: str, depth: int, now: float, parent_rel: str = "", si
     return out
 
 
+def compact(n: dict) -> dict:
+    """Payload form: no per-node path (the page rebuilds it from names), whole-second times."""
+    out = {k: v for k, v in n.items() if k not in ("path", "children")}
+    out["mtime"] = int(n["mtime"])
+    if out.get("file"):
+        out.pop("files", None)
+    if "children" in n:
+        out["children"] = [compact(c) for c in n["children"]]
+    return out
+
+
 def reclaimables(tree: dict, prefix: str) -> list:
     found = []
 
@@ -320,7 +331,7 @@ def collect(root: Path | None = None, now: float | None = None) -> dict:
     return {
         "generated_at": now, "scan_seconds": round(time.time() - t0, 2), "files_scanned": w.files,
         "disk": {"total": total.total, "used": total.used, "free": total.free},
-        "hermes": tree, "kinds": KINDS, "reclaimable": rec, "reclaimable_bytes": sum(r["bytes"] for r in rec),
+        "hermes": compact(tree), "kinds": KINDS, "reclaimable": rec, "reclaimable_bytes": sum(r["bytes"] for r in rec),
         "bots": work, "privacy": "read-only; paths, sizes, times and counts only, no message text",
     }
 

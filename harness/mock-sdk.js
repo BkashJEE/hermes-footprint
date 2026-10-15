@@ -15,6 +15,13 @@ export const host = {
       const freed = results.reduce((s, r) => s + r.bytes, 0)
       return { code: 0, output: JSON.stringify({ results, freed_bytes: freed, free_after: payload.disk.free + freed }) }
     }
-    return { code: 0, output: 'some log line\n' + JSON.stringify(payload) }
+    // Same protocol and the same 48,000-character cap as the real cli.exec.
+    const bytes = new TextEncoder().encode(JSON.stringify(payload)), PART = 30000
+    const parts = Math.max(1, Math.ceil(bytes.length / PART))
+    const j = params.argv.indexOf('part'), n = j >= 0 ? Number(params.argv[j + 1]) : 0
+    let bin = ''
+    for (const b of bytes.subarray(n * PART, (n + 1) * PART)) bin += String.fromCharCode(b)
+    const out = 'some log line\n' + JSON.stringify({ id: 'mock', part: n, parts, data: btoa(bin) })
+    return { code: 0, output: out.slice(0, 48000) }
   },
 }
