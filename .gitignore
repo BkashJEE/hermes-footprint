@@ -2,3 +2,4 @@ __pycache__/
 harness/payload.json
 harness/payload.js
 docs/social.html
+.hermes-package.json

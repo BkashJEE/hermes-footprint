@@ -16,14 +16,19 @@ const ROUTE = '/footprint'
 const CLI_TIMEOUT_MS = 120000
 
 // ── data ────────────────────────────────────────────────────────────────────
-// Footprint measures THIS machine's disk, so it always runs on a local route, never on a
-// remote connection (a chat focused on another machine must not move the scan there).
-async function resolveRoute() {
+// Footprint measures THIS machine's disk, so it only runs on local routes, never on a remote
+// connection. The plugin is enabled per profile, so try the profile in focus first, then the
+// primary, then the rest, and remember the first one where `hermes footprint` exists.
+let goodRoute = null
+async function localRoutes() {
+  const owner = host.state?.focusedSessionOwner?.get?.() || null
   const routes = (await host.profileRoutes()).filter((r) => r.mode === 'local')
-  const route = routes.find((r) => r.primary) || routes[0]
-  if (!route) throw new Error('No local Hermes profile available')
-  return route
+  if (!routes.length) throw new Error('No local Hermes profile available')
+  const rank = (r) => (goodRoute && r.connectionId === goodRoute.connectionId && r.profile === goodRoute.profile ? 0
+    : owner && r.connectionId === owner.connectionId && r.profile === owner.profile ? 1 : r.primary ? 2 : 3)
+  return [...routes].sort((a, b) => rank(a) - rank(b))
 }
+const NOT_HERE = /is not a `?hermes`? command|invalid choice: 'footprint'/
 
 function parseCliJson(output) {
   const lines = String(output || '').split('\n').map((l) => l.trim()).filter(Boolean)
@@ -58,14 +63,25 @@ async function scan() {
   return first.parts ? joinParts(first) : first
 }
 
-async function runFootprint(args) {
-  const route = await resolveRoute()
+async function runOn(route, args) {
   const res = await host.requestProfile(route, 'cli.exec',
     { argv: ['--profile', route.targetProfile, 'footprint', ...args, '--json'], timeout: CLI_TIMEOUT_MS / 1000 }, CLI_TIMEOUT_MS + 5000)
   if (res && res.blocked) throw new Error(res.hint || 'cli.exec blocked')
+  if (NOT_HERE.test(String(res && res.output || ''))) return null
   const payload = parseCliJson(res && res.output)
   if (payload.error) throw new Error(payload.error)
   return payload
+}
+
+async function runFootprint(args) {
+  const tried = []
+  for (const route of await localRoutes()) {
+    const payload = await runOn(route, args)
+    if (payload) { goodRoute = route; return payload }
+    tried.push(route.profile)
+  }
+  throw new Error(`the hermes-footprint plugin is not enabled in any local profile (tried ${tried.join(', ')}). ` +
+    'Run: hermes plugins enable hermes-footprint')
 }
 
 // One shared store so the page and the status chip never double-scan.
@@ -75,7 +91,7 @@ function rescan() {
   if (store.inflight) return store.inflight
   store.inflight = scan()
     .then((d) => { store.data = d; store.error = null; store.at = Date.now() })
-    .catch((e) => { store.error = String(e && e.message || e) })
+    .catch((e) => { store.error = String(e && e.message || e); console.error(`[hermes-footprint] scan failed: ${store.error}`) })
     .finally(() => { store.inflight = null; notify() })
   notify()
   return store.inflight
