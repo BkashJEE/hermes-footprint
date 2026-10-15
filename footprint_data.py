@@ -73,13 +73,73 @@ def kind_of(rel: str) -> str:
     return "other"
 
 
+class Stopped(Exception):
+    """The user pressed Stop on the Desktop page."""
+
+
+class Progress:
+    """What a running scan is doing, for the Desktop page to poll (`footprint progress`), and the
+    Stop flag it checks (`footprint stop`). Both are small files under plugin-data."""
+
+    def __init__(self, root: Path):
+        self.dir = root / "plugin-data" / "hermes-footprint"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.stop_flag = self.dir / "stop"
+        self.stop_flag.unlink(missing_ok=True)
+        try:
+            self.last = json.loads((self.dir / "last.json").read_text())
+        except (OSError, ValueError):
+            self.last = {}
+        self.started = time.time()
+        self.at = 0.0
+        self.state = {"phase": "walk", "files": 0, "where": ""}
+
+    def update(self, force: bool = False, **kw) -> None:
+        self.state.update(kw)
+        now = time.time()
+        if not force and now - self.at < 0.5:
+            return
+        self.at = now
+        if self.stop_flag.exists():
+            raise Stopped()
+        data = {**self.state, "started": self.started, "elapsed": round(now - self.started, 1),
+                "expected_files": self.last.get("files"), "expected_seconds": self.last.get("seconds"), "running": True}
+        tmp = self.dir / "progress.json.tmp"
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, self.dir / "progress.json")
+
+    def finish(self, files: int, stopped: bool = False) -> None:
+        if not stopped:
+            (self.dir / "last.json").write_text(json.dumps({"files": files, "seconds": round(time.time() - self.started, 1)}))
+        (self.dir / "progress.json").write_text(json.dumps({"running": False, "stopped": stopped}))
+        self.stop_flag.unlink(missing_ok=True)
+
+
+def read_progress(root: Path | None = None) -> dict:
+    root = Path(root) if root else hermes_root()
+    try:
+        return json.loads((root / "plugin-data" / "hermes-footprint" / "progress.json").read_text())
+    except (OSError, ValueError):
+        return {"running": False}
+
+
+def request_stop(root: Path | None = None) -> dict:
+    root = Path(root) if root else hermes_root()
+    d = root / "plugin-data" / "hermes-footprint"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "stop").touch()
+    return {"ok": True}
+
+
 class Walker:
     """dust's shape, single-threaded: walk once, aggregate bottom-up, dedupe hardlinks."""
 
-    def __init__(self, dev: int):
+    def __init__(self, dev: int, progress: Progress | None = None, root: str = ""):
         self.dev = dev
         self.seen: set = set()
         self.files = 0
+        self.progress = progress
+        self.root = root
 
     def walk(self, path: str) -> dict:
         node = {"name": os.path.basename(path) or path, "bytes": 0, "files": 0, "mtime": 0.0, "children": [], "_abs": path}
@@ -108,6 +168,8 @@ class Walker:
                         self.seen.add(key)
                     size = s.st_blocks * 512
                     self.files += 1
+                    if self.progress and not self.files % 2000:
+                        self.progress.update(files=self.files, where=path[len(self.root):].lstrip("/").split("/")[0])
                     node["files"] += 1; node["bytes"] += size
                     node["mtime"] = max(node["mtime"], s.st_mtime)
                     node.setdefault("_files", []).append((e.name, size, s.st_mtime))
@@ -126,6 +188,35 @@ REBUILDABLE = {
 
 # Toolchains Hermes installs and expects to find (language servers, runtimes): not ours to offer.
 HERMES_MANAGED = re.compile(r"^(profiles/[^/]+/)?(lsp|tools|installs|bin)/")
+
+
+def git_info(path: str | None) -> dict | None:
+    """What git says about a checkout, like disktree's panel: branch, changed and untracked files,
+    commits that exist on no remote, stashes in its repo, and the last commit's time."""
+    if not path:
+        return None
+
+    def run(*args):
+        r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=30)
+        return r.stdout if r.returncode == 0 else None
+    try:
+        status = run("status", "--porcelain=v1", "--branch")
+        if status is None:
+            return None
+        lines = status.splitlines()
+        head = lines[0][3:] if lines and lines[0].startswith("## ") else ""
+        branch = None if head.startswith("HEAD (no branch)") else head.split("...")[0].replace("No commits yet on ", "")
+        unpushed = run("rev-list", "--count", "HEAD", "--not", "--remotes")
+        last = run("log", "-1", "--format=%ct")
+        stashes = run("stash", "list")
+        return {"branch": branch, "short": (run("rev-parse", "--short", "HEAD") or "").strip() or None,
+                "changed": sum(1 for l in lines[1:] if l and not l.startswith("??")),
+                "untracked": sum(1 for l in lines[1:] if l.startswith("??")),
+                "unpushed": int(unpushed.strip()) if unpushed and unpushed.strip().isdigit() else None,
+                "stashes": len(stashes.splitlines()) if stashes else 0,
+                "last_commit": int(last.strip()) if last and last.strip().isdigit() else None}
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def git_dirty(path: str | None) -> int:
@@ -157,8 +248,16 @@ def reclaim_reason(rel: str, node: dict, siblings: list, parent_rel: str, now: f
     if parent in ("checkpoints", "state-snapshots") and age > STALE_AGE:
         return f"snapshot untouched for {int(age // DAY)} days"
     if parent == "worktrees" and age > STALE_AGE:
-        dirty = git_dirty(node.get("_abs"))
-        return (f"worktree untouched for {int(age // DAY)} days" + (f"; it has {dirty} uncommitted or untracked item(s), look first" if dirty else "")
+        g = node["_git"] = git_info(node.get("_abs"))
+        risks = []
+        if g:
+            if g["changed"]:
+                risks.append(f"{g['changed']} changed file(s)")
+            if g["untracked"]:
+                risks.append(f"{g['untracked']} untracked item(s)")
+            if g["unpushed"]:
+                risks.append(f"{g['unpushed']} commit(s) on no remote")
+        return (f"worktree untouched for {int(age // DAY)} days" + (f"; it has {', '.join(risks)}, look first" if risks else "")
                 + " (then run git worktree prune in its repo)")
     if name == "pet-builds":
         return "build output"
@@ -174,6 +273,8 @@ def shape(node: dict, rel: str, depth: int, now: float, parent_rel: str = "", si
         why = reclaim_reason(rel, node, siblings or [], parent_rel, now, sib_files)
         if why:
             out["reclaim"] = why
+            if node.get("_git"):
+                out["git"] = node["_git"]
     kids = sorted(node["children"], key=lambda c: -c["bytes"])
     files = sorted(node.get("_files", []), key=lambda f: -f[1])
     entries = [("dir", c) for c in kids] + [("file", f) for f in files]
@@ -220,7 +321,7 @@ def reclaimables(tree: dict, prefix: str) -> list:
     def go(n):
         if n.get("reclaim"):
             found.append({"path": f"{prefix}/{n['path']}" if n["path"] else prefix, "bytes": n["bytes"], "reason": n["reclaim"],
-                          "kind": n["kind"], "mtime": n["mtime"]})
+                          "kind": n["kind"], "mtime": n["mtime"], **({"git": n["git"]} if n.get("git") else {})})
             return
         for c in n.get("children", []):
             go(c)
@@ -312,22 +413,35 @@ def du(path: str, dev: int, limit_s: float = 4.0) -> int | None:
     return total
 
 
-def collect(root: Path | None = None, now: float | None = None) -> dict:
+def collect(root: Path | None = None, now: float | None = None, report: bool = False) -> dict:
     root = Path(root) if root else hermes_root()
     home = Path.home()
     now = time.time() if now is None else now
     t0 = time.time()
-    dev = os.stat(root).st_dev
-    w = Walker(dev)
-    raw = w.walk(str(root))
-    raw["name"] = "~/.hermes"
-    tree = shape(raw, "", 0, now)
-    work = bot_work(root, home)
-    for f in work["folders"]:
-        if f["exists"]:
-            f["bytes"] = du(os.path.expanduser(f["path"]), os.stat(os.path.expanduser(f["path"])).st_dev)
+    prog = Progress(root) if report else None
+    try:
+        dev = os.stat(root).st_dev
+        w = Walker(dev, prog, str(root))
+        raw = w.walk(str(root))
+        raw["name"] = "~/.hermes"
+        if prog:
+            prog.update(force=True, phase="sort", files=w.files, where="")
+        tree = shape(raw, "", 0, now)
+        if prog:
+            prog.update(force=True, phase="bots")
+        work = bot_work(root, home)
+        for i, f in enumerate(work["folders"]):
+            if f["exists"]:
+                if prog:
+                    prog.update(phase="sizes", where=f["path"], step=i + 1, steps=len(work["folders"]))
+                f["bytes"] = du(os.path.expanduser(f["path"]), os.stat(os.path.expanduser(f["path"])).st_dev)
+    except Stopped:
+        prog.finish(0, stopped=True)
+        return {"stopped": True}
     total = shutil.disk_usage(str(root))
     rec = reclaimables(tree, "~/.hermes")
+    if prog:
+        prog.finish(w.files)
     return {
         "generated_at": now, "scan_seconds": round(time.time() - t0, 2), "files_scanned": w.files,
         "disk": {"total": total.total, "used": total.used, "free": total.free},

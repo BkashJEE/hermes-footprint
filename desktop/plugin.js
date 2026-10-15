@@ -42,13 +42,14 @@ function parseCliJson(output) {
 
 // cli.exec returns at most 48,000 characters, so a big scan arrives as base64 parts.
 function b64Bytes(s) { const bin = atob(s); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out }
-async function joinParts(first) {
+async function joinParts(first, onPart) {
   const rest = []
   for (let i = 1; i < first.parts; i++) rest.push(i)
   const got = [first]
   for (let k = 0; k < rest.length; k += 4) { // four processes at a time
     const batch = await Promise.all(rest.slice(k, k + 4).map((i) => runFootprint(['part', String(i)])))
     got.push(...batch)
+    if (onPart) onPart(got.length, first.parts)
   }
   if (got.some((p) => p.id !== first.id)) throw new Error('scan changed while loading; press Rescan')
   got.sort((a, b) => a.part - b.part)
@@ -60,8 +61,23 @@ async function joinParts(first) {
 }
 async function scan() {
   const first = await runFootprint([])
-  return first.parts ? joinParts(first) : first
+  if (first.stopped) return first
+  if (!first.parts) return first
+  store.progress = { phase: 'load', step: 1, steps: first.parts }; notify()
+  return joinParts(first, (n, of) => { store.progress = { phase: 'load', step: n, steps: of }; notify() })
 }
+
+// While a scan runs, read its progress file (`footprint progress`) one call at a time.
+async function pollProgress() {
+  while (store.inflight) {
+    try {
+      const p = await runFootprint(['progress'])
+      if (store.inflight && p.running && store.progress?.phase !== 'load') { store.progress = p; notify() }
+    } catch { /* progress is best effort */ }
+    await new Promise((r) => setTimeout(r, 1200))
+  }
+}
+function stopScan() { store.stopping = true; notify(); runFootprint(['stop']).catch(() => null) }
 
 async function runOn(route, args) {
   const res = await host.requestProfile(route, 'cli.exec',
@@ -89,11 +105,13 @@ const store = { data: null, error: null, at: 0, listeners: new Set(), inflight: 
 function notify() { store.listeners.forEach((fn) => fn()) }
 function rescan() {
   if (store.inflight) return store.inflight
+  store.progress = null; store.stopped = false; store.stopping = false
   store.inflight = scan()
-    .then((d) => { store.data = d; store.error = null; store.at = Date.now() })
+    .then((d) => { if (d.stopped) store.stopped = true; else { store.data = d; store.error = null; store.at = Date.now() } })
     .catch((e) => { store.error = String(e && e.message || e); console.error(`[hermes-footprint] scan failed: ${store.error}`) })
-    .finally(() => { store.inflight = null; notify() })
+    .finally(() => { store.inflight = null; store.progress = null; store.stopping = false; notify() })
   notify()
+  setTimeout(pollProgress, 1500)
   return store.inflight
 }
 function useFootprint() {
@@ -396,6 +414,7 @@ function Deck({ items, onDone, onCancel, start = 0 }) {
       jsx('div', { style: { fontSize: 13, color: C.t1, wordBreak: 'break-all' }, children: r.path }),
       jsx('div', { style: { fontSize: 12.5, color: sf.color === C.yellow ? C.yellow : C.t2, marginTop: 8, lineHeight: 1.45 }, children: r.reason }),
       r.mtime ? jsx('div', { style: { fontSize: 11.5, color: C.t3, marginTop: 4 }, children: `Last changed ${ago(r.mtime)}` }) : null,
+      r.git ? jsx(GitBlock, { g: r.git }) : null,
       jsx('div', { style: { marginTop: 14 }, children: jsx(ActionRow, { item: r }) }),
       jsxs('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 16 }, children: [
         jsx('button', { type: 'button', onClick: () => decide('keep'), style: btn({ padding: '10px 0', fontSize: 13, color: C.t1 }), children: 'Keep  ·  K' }),
@@ -429,8 +448,8 @@ function whatItIs(r) {
   const [why, look] = r.reason.split('; ')
   const short = why.includes(': ') ? why.split(': ').pop() : why
   const bullets = [short.charAt(0).toUpperCase() + short.slice(1)]
-  if (look) bullets.push(look.replace(/^it has/, 'Has').replace(/ \(then.*$/, ''))
-  if (r.mtime) bullets.push(`Last changed ${ago(r.mtime)}`)
+  if (look && !r.git) bullets.push(look.replace(/^it has/, 'Has').replace(/ \(then.*$/, ''))
+  if (r.mtime && !r.git) bullets.push(`Last changed ${ago(r.mtime)}`)
   return { title, bullets }
 }
 
@@ -483,15 +502,18 @@ function GoCard({ r, share, marked, onToggle, onDetails }) {
         ] }),
       ] }),
       jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 12 }, children: [
-        jsx('span', { style: { fontSize: 30, fontWeight: 650, color: C.t1, fontFamily: MONO, letterSpacing: '-.02em' }, children: fmt(r.bytes) }),
-        jsx('span', { style: { fontSize: 11.5, color: C.t3 }, children: `${share < 1 ? '<1' : Math.round(share)}% of what can go` }),
+        jsx('span', { style: { fontSize: 30, fontWeight: 650, color: C.t1, fontFamily: MONO, letterSpacing: '-.02em', whiteSpace: 'nowrap' }, children: fmt(r.bytes) }),
         jsx('span', { style: { marginLeft: 'auto', alignSelf: 'center', flex: 'none', fontSize: 10, fontWeight: 700, letterSpacing: '.07em', color: marked ? C.red : sf.color,
           border: `1px solid ${marked ? C.red : sf.color}`, borderRadius: 20, padding: '2px 8px' }, children: marked ? 'TRASH' : sf.label }),
       ] }),
-      jsx('div', { style: { height: 4, borderRadius: 2, background: C.stroke, marginTop: 6 }, children:
-        jsx('div', { style: { width: `${Math.max(1.5, share)}%`, height: '100%', borderRadius: 2, background: edge } }) }),
+      jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }, children: [
+        jsx('div', { style: { flex: 1, height: 4, borderRadius: 2, background: C.stroke }, children:
+          jsx('div', { style: { width: `${Math.max(1.5, share)}%`, height: '100%', borderRadius: 2, background: edge } }) }),
+        jsx('span', { style: { fontSize: 11, color: C.t3, whiteSpace: 'nowrap' }, children: `${share < 1 ? '<1' : Math.round(share)}% of what can go` }),
+      ] }),
       jsx('ul', { style: { margin: '10px 0 0', paddingLeft: 16, fontSize: 12.5, lineHeight: 1.45, color: C.t2 }, children: w.bullets.map((b, i) => jsx('li', { children: b }, i)) }),
-      jsxs('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 12 }, children: [
+      r.git ? jsx(GitBlock, { g: r.git }) : null,
+      jsxs('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 'auto', paddingTop: 12 }, children: [
         jsx('button', { type: 'button', onClick: () => marked && onToggle(r), style: btn({ padding: '5px 12px', color: marked ? C.t2 : C.t1, borderColor: marked ? C.stroke : C.t4 }), children: 'Keep' }),
         jsx('button', { type: 'button', onClick: () => !marked && onToggle(r),
           style: btn({ padding: '5px 12px', color: marked ? '#fff' : C.t2, background: marked ? C.red : 'transparent', border: marked ? 0 : `1px solid ${C.stroke}` }), children: marked ? '✓ Trash' : 'Trash' }),
@@ -520,6 +542,8 @@ function CardsView({ items, marked, onToggle, onReview, onTrashMarked, keptCount
     jsxs('div', { style: { display: 'flex', gap: 8, alignItems: 'center' }, children: [
       keptCount ? jsx('button', { type: 'button', onClick: onShowKept, style: { background: 'none', border: 0, color: C.t3, fontSize: 12, cursor: 'pointer' }, children: `${keptCount} kept · show` }) : null,
       jsx('button', { type: 'button', onClick: () => onReview(0), style: btn({ color: C.t1, padding: '6px 12px' }), children: 'Review one by one' }),
+      markedItems.length ? jsx('button', { type: 'button', title: 'Draft a prompt in chat for a Bot to clear the marked items (not sent)', onClick: () => handToBot(markedItems),
+        style: btn({ color: C.t1, padding: '6px 12px' }), children: '✦ Hand to a Bot' }) : null,
       jsx('button', { type: 'button', disabled: !markedItems.length, onClick: onTrashMarked,
         style: btn({ padding: '6px 12px', background: markedItems.length ? C.red : 'transparent', color: markedItems.length ? '#fff' : C.t4, border: markedItems.length ? 0 : `1px solid ${C.stroke}`, cursor: markedItems.length ? 'pointer' : 'default' }),
         children: markedItems.length ? `Move to Trash · ${fmt(markedBytes)}` : 'Move to Trash' }),
@@ -529,6 +553,63 @@ function CardsView({ items, marked, onToggle, onReview, onTrashMarked, keptCount
     ? jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 12 }, children: [summary,
       ...items.map((r, i) => jsx(GoCard, { key: r.path, r, share: (100 * r.bytes) / total, marked: marked.has(r.path), onToggle, onDetails: () => onReview(i) }))] })
     : jsx('div', { style: { color: C.green, fontSize: 13 }, children: 'Nothing can go right now. Hermes is tidy.' }) })
+}
+
+function GitBlock({ g }) {
+  const where = g.branch ? `Branch ${g.branch}` : `Detached at ${(g.short || '?').slice(0, 7)}`
+  const row = (text, color) => jsx('div', { style: { color: color || C.t2 }, children: text })
+  return jsxs('div', { style: { marginTop: 10, padding: '8px 10px', borderRadius: 8, background: 'color-mix(in srgb, var(--ui-text-primary, #e6edf3) 4%, transparent)',
+    border: `1px solid ${C.stroke}`, fontSize: 12, lineHeight: 1.55 }, children: [
+    row(`${where}${g.last_commit ? ` · last commit ${ago(g.last_commit)}` : ''}`, C.t1),
+    row(g.unpushed ? `${g.unpushed} commit${g.unpushed > 1 ? 's' : ''} on no remote: only here` : g.unpushed === 0 ? 'Every commit is on a remote' : 'Could not check remotes',
+      g.unpushed ? C.red : g.unpushed === 0 ? C.green : C.t3),
+    row(g.changed || g.untracked ? `${g.changed} changed · ${g.untracked} untracked` : 'No uncommitted changes', g.changed || g.untracked ? C.yellow : C.green),
+    g.stashes ? row(`${g.stashes} stash${g.stashes > 1 ? 'es' : ''} in its main repo (not removed with it)`, C.t3) : null,
+  ] })
+}
+
+// Ask a Bot to clear the marked list, disktree's "copy a prompt for a coding agent", but straight into
+// Hermes chat as a draft. Paths come from the scan; a name holding a newline is left out.
+// Each tool's own clean command, pointed at THIS folder (a bare `uv cache clean` would empty the global cache instead).
+const CLEAN_HINT = { uv: (p) => `~/.hermes/bin/uv cache clean --cache-dir ${p}`, pip: (p) => `PIP_CACHE_DIR=${p} pip cache purge`,
+  _cacache: (p) => `npm cache clean --force --cache ${p.replace(/\/_cacache$/, '')}` }
+function handToBot(items) {
+  const safe = items.filter((r) => !/[\n\r]/.test(r.path))
+  const lines = safe.map((r) => {
+    const name = r.path.split('/').pop()
+    const hint = r.kind === 'worktree' ? 'git worktree: use `git worktree remove` from its main repo, never if it holds work found nowhere else'
+      : CLEAN_HINT[name] ? `the tool's own command, for this folder only: \`${CLEAN_HINT[name](r.path)}\`` : 'move it to the desktop trash'
+    return `- ${r.path} (${fmt(r.bytes)}): ${r.reason}. How: ${hint}.`
+  })
+  const text = `Footprint found ${fmt(safe.reduce((a, r) => a + r.bytes, 0))} I want back on this machine. Free it by removing exactly these, and nothing else:\n\n${lines.join('\n')}\n\n` +
+    'Before each one, check the path still exists and still is what the note says. For a git checkout, check for uncommitted changes, untracked files and commits that exist on no remote; if any, stop and ask me. ' +
+    'Prefer a tool\'s own clean command; otherwise move to the trash (gio trash), never rm -rf. Never touch state.db, memories, skills, plugins, config, keys or the Hermes app. ' +
+    'Show me the plan first and wait for my OK. Afterwards report what was removed and how much free space was gained.'
+  host.navigate('/')
+  window.setTimeout(() => {
+    window.dispatchEvent(new CustomEvent(COMPOSER_INSERT, { detail: { mode: 'block', target: 'main', text } }))
+    window.dispatchEvent(new CustomEvent(COMPOSER_FOCUS, { detail: { target: 'main' } }))
+  }, 250)
+}
+
+const PHASE = { walk: 'Scanning', sort: 'Sorting what it found', bots: "Reading your Bots' sessions", sizes: 'Measuring Bot folders', load: 'Loading results' }
+function ScanProgress({ s }) {
+  const p = s.progress || {}
+  const frac = p.phase === 'walk' && p.expected_files ? Math.min(0.95, p.files / p.expected_files) * 0.8
+    : p.phase === 'sort' ? 0.8 : p.phase === 'bots' ? 0.83 : p.phase === 'sizes' ? 0.85 + 0.07 * ((p.step || 0) / (p.steps || 1))
+    : p.phase === 'load' ? 0.92 + 0.08 * ((p.step || 0) / (p.steps || 1)) : null
+  const detail = p.phase === 'walk' ? `${(p.files || 0).toLocaleString()}${p.expected_files ? ` of ~${p.expected_files.toLocaleString()}` : ''} files${p.where ? ` · in ${p.where}` : ''}`
+    : p.phase === 'sizes' ? `${p.step} of ${p.steps}${p.where ? ` · ${p.where}` : ''}` : p.phase === 'load' ? `part ${p.step} of ${p.steps}` : 'starting…'
+  return jsxs('div', { style: { flex: 1, minWidth: 260, maxWidth: 520 }, children: [
+    jsx('div', { style: { height: 8, borderRadius: 4, background: C.stroke, overflow: 'hidden' }, children: jsx('div', { style: {
+      height: '100%', borderRadius: 4, background: C.accent, width: frac == null ? '30%' : `${Math.round(frac * 100)}%`, transition: 'width .6s ease',
+      animation: frac == null ? 'fpPulse 1.2s ease-in-out infinite alternate' : 'none' } }) }),
+    jsxs('div', { style: { display: 'flex', gap: 10, marginTop: 5, fontSize: 11.5, color: C.t3, alignItems: 'center' }, children: [
+      jsx('span', { style: { color: C.t1 }, children: s.stopping ? 'Stopping…' : PHASE[p.phase] || 'Scanning' }),
+      jsx('span', { style: { fontFamily: MONO }, children: detail }),
+      p.phase !== 'load' ? jsx('button', { type: 'button', disabled: s.stopping, onClick: stopScan, style: btn({ marginLeft: 'auto', fontSize: 11, padding: '1px 9px' }), children: 'Stop' }) : null,
+    ] }),
+  ] })
 }
 
 function DiskBar({ disk, hermes, freeing }) {
@@ -608,6 +689,8 @@ function Review({ items, onCancel, onDone }) {
       jsxs('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' }, children: result
         ? [jsx('button', { type: 'button', onClick: onDone, style: btn({ color: C.t1 }), children: 'Close' }, 'c')]
         : [
+          jsx('button', { type: 'button', onClick: () => { handToBot(items); onCancel() }, disabled: busy, style: btn({ marginRight: 'auto', color: C.t1 }),
+            title: 'Draft a prompt in chat for a Bot to do it, checking each path first (not sent)', children: '✦ Hand to a Bot' }, 'bot'),
           jsx('button', { type: 'button', onClick: onCancel, disabled: busy, style: btn(), children: 'Cancel' }, 'x'),
           jsx('button', { type: 'button', onClick: go, disabled: busy, style: btn({ background: C.red, color: '#fff', border: 0 }), children: busy ? 'Moving…' : `Move to Trash · ${fmt(total)}` }, 'go'),
         ] }),
@@ -730,9 +813,10 @@ function FootprintPage() {
   const head = jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', marginBottom: 12 }, children: [
     jsxs('div', { children: [
       jsx('div', { style: { fontSize: 18, fontWeight: 600, color: C.t1 }, children: 'Footprint' }),
-      jsx('div', { style: { fontSize: 12, color: C.t3 }, children: d ? `${d.files_scanned.toLocaleString()} files · scanned in ${d.scan_seconds}s` : s.inflight ? 'Scanning ~/.hermes…' : '' }),
+      jsx('div', { style: { fontSize: 12, color: C.t3 }, children: d ? `${d.files_scanned.toLocaleString()} files · scanned in ${d.scan_seconds}s` : '' }),
     ] }),
-    d ? jsx(DiskBar, { disk: d.disk, hermes: d.hermes.bytes, freeing: d.reclaimable.filter((r) => marked.has(r.path)).reduce((a, r) => a + r.bytes, 0) }) : null,
+    s.inflight ? jsx(ScanProgress, { s }) : d ? jsx(DiskBar, { disk: d.disk, hermes: d.hermes.bytes, freeing: d.reclaimable.filter((r) => marked.has(r.path)).reduce((a, r) => a + r.bytes, 0) }) : null,
+    s.stopped && !s.inflight ? jsx('span', { style: { fontSize: 12, color: C.t3 }, children: d ? 'Scan stopped; showing the last one.' : 'Scan stopped.' }) : null,
     jsx('button', { type: 'button', onClick: () => rescan(), disabled: !!s.inflight, style: btn({ marginLeft: 'auto' }), children: s.inflight ? 'Scanning…' : 'Rescan' }),
   ] })
   if (!d) {
@@ -778,7 +862,7 @@ function FootprintPage() {
       const k = new Set(kept); keep.forEach((x) => k.add(x.path)); setKept(k); saveKept(k)
       setMarked((m) => { const n = new Set(m); trash.forEach((x) => n.add(x.path)); keep.forEach((x) => n.delete(x.path)); return n }); setDeck(false); if (trash.length) setReview(true)
     } }) : null,
-    jsx('style', { children: '@keyframes fpIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}' }),
+    jsx('style', { children: '@keyframes fpPulse{from{opacity:.35}to{opacity:1}}@keyframes fpIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}' }),
     review ? jsx(Review, { items: d.reclaimable.filter((r) => marked.has(r.path)), onCancel: () => setReview(false), onDone: () => { setReview(false); setMarked(new Set()) } }) : null,
   ] })
 }

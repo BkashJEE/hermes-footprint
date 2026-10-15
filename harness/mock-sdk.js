@@ -8,6 +8,11 @@ export const host = {
   profileRoutes: async () => [{ connectionId: 'local', mode: 'local', primary: true, profile: 'ceo', targetProfile: 'ceo' }],
   requestProfile: async (route, method, params) => {
     window.__calls = (window.__calls || []).concat([{ method, argv: params.argv }])
+    if (params.argv.includes('progress')) {
+      const t = (Date.now() - (window.__scanStart || Date.now())) / 1000
+      return { code: 0, output: JSON.stringify({ running: true, phase: t < 3 ? 'walk' : 'sizes', files: Math.round(t * 160000), where: t < 1.5 ? 'hermes-agent' : 'installs', expected_files: 494823, step: 4, steps: 13 }) }
+    }
+    if (params.argv.includes('stop')) return { code: 0, output: '{"ok":true}' }
     if (params.argv.includes('open')) return { code: 0, output: JSON.stringify({ ok: true, path: params.argv[params.argv.indexOf('open') + 1] }) }
     const i = params.argv.indexOf('trash')
     if (i >= 0) {
@@ -16,6 +21,7 @@ export const host = {
       const freed = results.reduce((s, r) => s + r.bytes, 0)
       return { code: 0, output: JSON.stringify({ results, freed_bytes: freed, free_after: payload.disk.free + freed }) }
     }
+    if (!params.argv.includes('part') && new URLSearchParams(location.search).get('slow')) { window.__scanStart = Date.now(); await new Promise((r) => setTimeout(r, 6000)) }
     // Same protocol and the same 48,000-character cap as the real cli.exec.
     const bytes = new TextEncoder().encode(JSON.stringify(payload)), PART = 30000
     const parts = Math.max(1, Math.ceil(bytes.length / PART))

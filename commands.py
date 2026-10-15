@@ -50,7 +50,7 @@ def emit_parts(text: str, part: int = 0, scan_id: str | None = None) -> dict:
 
 
 def scan_payload() -> dict:
-    text = json.dumps(data.collect(), separators=(",", ":"), default=str)
+    text = json.dumps(data.collect(report=True), separators=(",", ":"), default=str)
     if len(text) <= PART_CHARS:
         return json.loads(text)
     scan_id = str(int(time.time() * 1000))
@@ -70,7 +70,7 @@ def slash_command(raw_args: str) -> str:
 
 
 def setup_argparse(subparser) -> None:
-    subparser.add_argument("action", nargs="?", choices=["scan", "trash", "part", "open"], default="scan")
+    subparser.add_argument("action", nargs="?", choices=["scan", "trash", "part", "open", "progress", "stop"], default="scan")
     subparser.add_argument("paths", nargs="*", help="With trash: ~/.hermes/... paths the scan marked reclaimable")
     subparser.add_argument("--json", action="store_true", help="Emit JSON for the desktop page")
     subparser.set_defaults(func=handle_cli)
@@ -81,6 +81,10 @@ def handle_cli(args) -> None:
         action = getattr(args, "action", "scan")
         if action == "trash":
             payload = data.trash(list(getattr(args, "paths", []) or []))
+        elif action == "progress":
+            payload = data.read_progress()
+        elif action == "stop":
+            payload = data.request_stop()
         elif action == "open":
             payload = data.open_folder((getattr(args, "paths", None) or [""])[0])
         elif action == "part":
