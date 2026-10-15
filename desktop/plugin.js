@@ -1,0 +1,481 @@
+// hermes-footprint: desktop half. Plain ESM, loaded uncompiled by Hermes Desktop (no JSX, no build).
+//
+// Surfaces: route /footprint (sidebar row "Footprint" + ⌘K "Open Footprint") and a status-bar chip.
+// Data: host.requestProfile(route, "cli.exec", { argv: ["--profile", p, "footprint", "--json"] })
+//       -> a fresh, read-only `hermes footprint` process. Scans on open and on Rescan, not on a timer.
+// Removal: only after the user reviews the marked list; runs `footprint trash PATH... --json`, which
+//       re-scans, refuses anything the scan did not mark, and moves to the desktop trash (never rm).
+// Look: theme variables only (--ui-*), so it follows Nous dark and every other skin.
+
+import { host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, STATUSBAR_AREAS } from '@hermes/plugin-sdk'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { jsx, jsxs } from 'react/jsx-runtime'
+
+const ID = 'hermes-footprint'
+const ROUTE = '/footprint'
+const CLI_TIMEOUT_MS = 120000
+
+// ── data ────────────────────────────────────────────────────────────────────
+async function resolveRoute() {
+  const owner = host.state?.focusedSessionOwner?.get?.() || null
+  const routes = await host.profileRoutes()
+  const exact = owner ? routes.filter((r) => r.connectionId === owner.connectionId && r.profile === owner.profile) : []
+  if (exact.length === 1) return exact[0]
+  const fallback = routes.find((r) => r.primary) || routes.find((r) => r.mode === 'local') || routes[0]
+  if (!fallback) throw new Error('No Hermes profile route available')
+  return fallback
+}
+
+function parseCliJson(output) {
+  const lines = String(output || '').split('\n').map((l) => l.trim()).filter(Boolean)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].startsWith('{')) continue
+    try { return JSON.parse(lines[i]) } catch { /* keep looking */ }
+  }
+  throw new Error(lines.slice(-2).join(' ') || 'empty output from hermes footprint')
+}
+
+async function runFootprint(args) {
+  const route = await resolveRoute()
+  const res = await host.requestProfile(route, 'cli.exec',
+    { argv: ['--profile', route.targetProfile, 'footprint', ...args, '--json'], timeout: CLI_TIMEOUT_MS / 1000 }, CLI_TIMEOUT_MS + 5000)
+  if (res && res.blocked) throw new Error(res.hint || 'cli.exec blocked')
+  const payload = parseCliJson(res && res.output)
+  if (payload.error) throw new Error(payload.error)
+  return payload
+}
+
+// One shared store so the page and the status chip never double-scan.
+const store = { data: null, error: null, at: 0, listeners: new Set(), inflight: null }
+function notify() { store.listeners.forEach((fn) => fn()) }
+function rescan() {
+  if (store.inflight) return store.inflight
+  store.inflight = runFootprint([])
+    .then((d) => { store.data = d; store.error = null; store.at = Date.now() })
+    .catch((e) => { store.error = String(e && e.message || e) })
+    .finally(() => { store.inflight = null; notify() })
+  notify()
+  return store.inflight
+}
+function useFootprint() {
+  const [, bump] = useState(0)
+  useEffect(() => {
+    const fn = () => bump((n) => n + 1)
+    store.listeners.add(fn)
+    if (store.data || store.error) fn() // the scan may have finished before this subscribed
+    else if (!store.inflight) rescan()
+    return () => store.listeners.delete(fn)
+  }, [])
+  return store
+}
+
+// ── theme ───────────────────────────────────────────────────────────────────
+const V = (name, fallback) => `var(${name}, ${fallback})`
+const C = {
+  accent: V('--ui-accent', '#4a84fe'), red: V('--ui-red', '#ff7b72'), yellow: V('--ui-yellow', '#d29922'),
+  green: V('--ui-green', '#3fb950'), t1: V('--ui-text-primary', '#e6edf3'), t2: V('--ui-text-secondary', '#b1bac4'),
+  t3: V('--ui-text-tertiary', '#7d8590'), t4: V('--ui-text-quaternary', '#6e7681'),
+  stroke: V('--ui-stroke-tertiary', '#30363d'), panel: V('--ui-bg-elevated', '#010409'),
+}
+function cssColor(varName, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim()
+  return v || fallback
+}
+const MONO = 'ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace'
+// What a folder is to Hermes -> theme variable. Canvas needs real colours, so they are read at paint time.
+const KIND_VARS = {
+  app: ['--ui-accent', '#4a84fe'], toolchain: ['--ui-purple', '#bc8cff'], memory: ['--ui-green', '#3fb950'],
+  skills: ['--ui-cyan', '#39c5cf'], worktree: ['--ui-orange', '#ffa657'], backup: ['--ui-yellow', '#d29922'],
+  browser: ['--ui-pink', '#f778ba'], cache: ['--ui-text-tertiary', '#7d8590'], bot: ['--ui-blue', '#79c0ff'],
+  other: ['--ui-text-quaternary', '#6e7681'],
+}
+const kindColor = (k) => { const [v, f] = KIND_VARS[k] || KIND_VARS.other; return cssColor(v, f) }
+const kindCss = (k) => { const [v, f] = KIND_VARS[k] || KIND_VARS.other; return V(v, f) }
+
+function fmt(b) {
+  if (b == null) return '—'
+  if (b >= 1e12) return `${(b / 1e12).toFixed(2)} TB`
+  if (b >= 1e9) return `${(b / 1e9).toFixed(b >= 1e10 ? 1 : 2)} GB`
+  if (b >= 1e6) return `${(b / 1e6).toFixed(b >= 1e8 ? 0 : 1)} MB`
+  if (b >= 1e3) return `${Math.round(b / 1e3)} KB`
+  return `${b} B`
+}
+function ago(ts) {
+  if (!ts) return ''
+  const d = (Date.now() / 1000 - ts) / 86400
+  return d < 1 ? 'today' : d < 2 ? 'yesterday' : d < 60 ? `${Math.floor(d)} days ago` : `${Math.floor(d / 30)} months ago`
+}
+
+// ── squarified treemap (Bruls, Huizing, van Wijk) ───────────────────────────
+function squarify(items, x, y, w, h) {
+  const total = items.reduce((s, it) => s + it.value, 0)
+  if (!total || w <= 0 || h <= 0) return []
+  const scale = (w * h) / total
+  const rest = items.map((it) => ({ it, area: it.value * scale })).filter((r) => r.area > 0)
+  const out = []
+  let row = []
+  const worst = (r, side) => {
+    const s = r.reduce((a, b) => a + b.area, 0)
+    let max = 0, min = Infinity
+    for (const q of r) { max = Math.max(max, q.area); min = Math.min(min, q.area) }
+    return Math.max((side * side * max) / (s * s), (s * s) / (side * side * min))
+  }
+  const layoutRow = () => {
+    const s = row.reduce((a, b) => a + b.area, 0)
+    if (w >= h) {
+      const cw = s / h; let cy = y
+      for (const q of row) { const ch = q.area / cw; out.push({ it: q.it, x, y: cy, w: cw, h: ch }); cy += ch }
+      x += cw; w -= cw
+    } else {
+      const ch = s / w; let cx = x
+      for (const q of row) { const cw = q.area / ch; out.push({ it: q.it, x: cx, y, w: cw, h: ch }); cx += cw }
+      y += ch; h -= ch
+    }
+    row = []
+  }
+  for (const r of rest) {
+    const side = Math.min(w, h)
+    if (!row.length || worst([...row, r], side) <= worst(row, side)) row.push(r)
+    else { layoutRow(); row.push(r) }
+  }
+  if (row.length) layoutRow()
+  return out
+}
+
+// Lay out `node`'s children in a box; folders big enough get a header strip and their own children.
+function layout(node, x, y, w, h, depth, maxDepth, out) {
+  const kids = (node.children || []).filter((c) => c.bytes > 0).map((c) => ({ value: c.bytes, node: c }))
+  for (const r of squarify(kids, x, y, w, h)) {
+    const n = r.it.node
+    const tile = { node: n, x: r.x, y: r.y, w: r.w, h: r.h, depth }
+    out.push(tile)
+    const open = depth < maxDepth && n.children && n.children.length && r.w > 70 && r.h > 46
+    if (open) { tile.header = true; layout(n, r.x + 2, r.y + 17, r.w - 4, r.h - 19, depth + 1, maxDepth, out) }
+  }
+  return out
+}
+
+function findPath(root, path) {
+  const trail = [root]
+  if (!path) return trail
+  let cur = root
+  for (;;) {
+    const next = (cur.children || []).find((c) => !c.rest && !c.file && (path === c.path || path.startsWith(c.path + '/')))
+    if (!next) return trail
+    trail.push(next); cur = next
+    if (next.path === path) return trail
+  }
+}
+
+// ── the treemap ─────────────────────────────────────────────────────────────
+function Treemap({ root, marked, onOpen, onToggle }) {
+  const wrap = useRef(null), canvas = useRef(null)
+  const [size, setSize] = useState({ w: 800, h: 460 })
+  const [hover, setHover] = useState(null)
+  const tiles = useMemo(() => layout(root, 0, 0, size.w, size.h, 0, 2, []), [root, size.w, size.h])
+
+  useEffect(() => {
+    const el = wrap.current
+    if (!el) return undefined
+    const ro = new ResizeObserver(() => setSize({ w: Math.max(200, el.clientWidth), h: Math.max(240, el.clientHeight) }))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  useEffect(() => {
+    const cv = canvas.current
+    if (!cv) return
+    const dpr = window.devicePixelRatio || 1
+    cv.width = size.w * dpr; cv.height = size.h * dpr
+    const g = cv.getContext('2d')
+    g.setTransform(dpr, 0, 0, dpr, 0, 0)
+    g.clearRect(0, 0, size.w, size.h)
+    const bg = cssColor('--ui-bg-elevated', '#010409'), text = cssColor('--ui-text-primary', '#e6edf3')
+    const red = cssColor('--ui-red', '#ff7b72')
+    g.font = '11px system-ui, sans-serif'; g.textBaseline = 'top'
+    for (const t of tiles) {
+      const n = t.node, col = kindColor(n.kind)
+      const x = t.x + 0.5, y = t.y + 0.5, w = Math.max(0, t.w - 1), h = Math.max(0, t.h - 1)
+      if (w < 1 || h < 1) continue
+      g.fillStyle = bg; g.fillRect(x, y, w, h)
+      g.globalAlpha = n.rest ? 0.12 : t.header ? 0.16 : 0.42 - t.depth * 0.06
+      g.fillStyle = col; g.fillRect(x, y, w, h)
+      g.globalAlpha = 1
+      if (n.reclaim) { // disktree's hatch: this space can come back
+        g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip()
+        g.strokeStyle = col; g.globalAlpha = 0.55; g.lineWidth = 1.2
+        for (let k = -h; k < w; k += 7) { g.beginPath(); g.moveTo(x + k, y + h); g.lineTo(x + k + h, y); g.stroke() }
+        g.restore()
+      }
+      g.strokeStyle = col; g.globalAlpha = hover === t ? 1 : 0.6; g.lineWidth = hover === t ? 2 : 1
+      g.strokeRect(x, y, w, h); g.globalAlpha = 1
+      if (marked.has(n.fullPath)) { g.strokeStyle = red; g.lineWidth = 2.5; g.setLineDash([5, 3]); g.strokeRect(x + 1.5, y + 1.5, w - 3, h - 3); g.setLineDash([]) }
+      if (w > 46 && h > 15) {
+        g.save(); g.beginPath(); g.rect(x + 3, y, w - 6, h); g.clip()
+        g.fillStyle = text; g.globalAlpha = n.rest ? 0.55 : 0.95
+        g.font = `${t.depth === 0 ? 600 : 500} ${t.depth === 0 ? 12 : 11}px system-ui, sans-serif`
+        g.fillText(n.name, x + 5, y + 3)
+        if (!t.header && h > 32) { g.globalAlpha = 0.6; g.font = `10.5px ${MONO}`; g.fillText(fmt(n.bytes), x + 5, y + 18) }
+        if (t.header && w > 140) { g.globalAlpha = 0.6; g.font = `10.5px ${MONO}`; const s = fmt(n.bytes); g.fillText(s, x + w - 6 - g.measureText(s).width, y + 3) }
+        g.restore()
+      }
+    }
+  }, [tiles, hover, marked, size.w, size.h])
+
+  const hit = (e) => {
+    const r = canvas.current.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top
+    let best = null
+    for (const t of tiles) if (px >= t.x && px < t.x + t.w && py >= t.y && py < t.y + t.h) best = t // deepest wins
+    return best
+  }
+  const tip = hover && hover.node
+  return jsxs('div', {
+    ref: wrap, style: { position: 'relative', flex: 1, minHeight: 300, borderRadius: 8, overflow: 'hidden', border: `1px solid ${C.stroke}` },
+    children: [
+      jsx('canvas', {
+        ref: canvas, style: { width: '100%', height: '100%', display: 'block', cursor: tip && (tip.reclaim || (tip.children && !tip.rest)) ? 'pointer' : 'default' },
+        onMouseMove: (e) => setHover(hit(e)), onMouseLeave: () => setHover(null),
+        onClick: (e) => {
+          const t = hit(e); if (!t) return
+          let n = t.node
+          if (n.reclaim) return onToggle(n)
+          if (!n.children || n.rest) { // a file or a folded tile: open its folder instead
+            const owner = tiles.filter((u) => u.header && t.x >= u.x && t.y >= u.y && t.x < u.x + u.w && t.y < u.y + u.h).pop()
+            if (!owner) return
+            n = owner.node
+          }
+          onOpen(n)
+        },
+      }),
+      tip ? jsxs('div', {
+        style: { position: 'absolute', left: Math.min(hover.x + 8, size.w - 290), top: Math.min(hover.y + hover.h + 6, size.h - 96), width: 280, pointerEvents: 'none',
+          background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 8, padding: '8px 10px', fontSize: 11.5, color: C.t2, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
+        children: [
+          jsx('div', { style: { color: C.t1, fontWeight: 600, wordBreak: 'break-all' }, children: tip.rest ? tip.name : tip.fullPath }),
+          jsx('div', { style: { fontFamily: MONO, marginTop: 3 }, children: `${fmt(tip.bytes)}${tip.files > 1 ? ` · ${tip.files.toLocaleString()} files` : ''}${tip.mtime ? ` · changed ${ago(tip.mtime)}` : ''}` }),
+          jsx('div', { style: { color: kindCss(tip.kind), marginTop: 2 }, children: store.data?.kinds?.[tip.kind] || tip.kind }),
+          tip.reclaim ? jsx('div', { style: { color: C.yellow, marginTop: 4 }, children: `Can go: ${tip.reclaim}. Click to mark.` }) : null,
+        ],
+      }) : null,
+    ],
+  })
+}
+
+// Paths in the payload are relative to ~/.hermes; give every node its full display path once.
+function withFullPaths(n, prefix) {
+  n.fullPath = n.path ? `${prefix}/${n.path}` : prefix
+  for (const c of n.children || []) withFullPaths(c, prefix)
+  return n
+}
+function kindTotals(n, acc = {}) {
+  if (!n.children || n.reclaim) { acc[n.kind] = (acc[n.kind] || 0) + n.bytes; return acc }
+  for (const c of n.children) kindTotals(c, acc)
+  return acc
+}
+
+// ── page ────────────────────────────────────────────────────────────────────
+const btn = (extra) => ({ fontSize: 12, padding: '4px 11px', borderRadius: 6, border: `1px solid ${C.stroke}`, background: 'transparent', color: C.t2, cursor: 'pointer', ...extra })
+const label = { fontSize: 10.5, letterSpacing: '.09em', color: C.t3, textTransform: 'uppercase' }
+
+function DiskBar({ disk, hermes, freeing }) {
+  const pct = (b) => `${Math.max(0.4, (100 * b) / disk.total)}%`
+  return jsxs('div', { style: { minWidth: 260, flex: 1, maxWidth: 520 }, children: [
+    jsxs('div', { style: { display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: C.stroke }, children: [
+      jsx('div', { style: { width: pct(disk.used - hermes), background: C.t4, opacity: 0.6 } }),
+      jsx('div', { style: { width: pct(hermes - freeing), background: C.accent } }),
+      freeing ? jsx('div', { style: { width: pct(freeing), background: `repeating-linear-gradient(135deg, ${C.green} 0 3px, transparent 3px 6px)` } }) : null,
+    ] }),
+    jsxs('div', { style: { display: 'flex', gap: 12, marginTop: 5, fontSize: 11, color: C.t3, fontFamily: MONO }, children: [
+      jsx('span', { style: { color: C.accent }, children: `Hermes ${fmt(hermes)}` }),
+      jsx('span', { children: `disk ${fmt(disk.used)} used` }),
+      jsx('span', { style: { color: freeing ? C.green : C.t3 }, children: freeing ? `${fmt(disk.free)} → ${fmt(disk.free + freeing)} free` : `${fmt(disk.free)} free` }),
+    ] }),
+  ] })
+}
+
+function WorthALook({ items, marked, onToggle, onReview }) {
+  const total = items.filter((r) => marked.has(r.path)).reduce((s, r) => s + r.bytes, 0)
+  return jsxs('div', { style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 10, padding: '10px 12px' }, children: [
+    jsxs('div', { style: { display: 'flex', alignItems: 'center' }, children: [
+      jsx('div', { style: label, children: `Worth a look · ${fmt(items.reduce((s, r) => s + r.bytes, 0))}` }),
+    ] }),
+    items.length ? items.map((r) => {
+      const on = marked.has(r.path)
+      return jsxs('label', { key: r.path, style: { display: 'flex', gap: 8, padding: '7px 0', borderBottom: `1px solid ${C.stroke}`, cursor: 'pointer', alignItems: 'flex-start' }, children: [
+        jsx('input', { type: 'checkbox', checked: on, onChange: () => onToggle(r), style: { marginTop: 2, accentColor: 'var(--ui-red, #ff7b72)' } }),
+        jsxs('div', { style: { minWidth: 0, flex: 1 }, children: [
+          jsxs('div', { style: { display: 'flex', gap: 6 }, children: [
+            jsx('span', { style: { width: 8, height: 8, borderRadius: 2, marginTop: 4, flex: 'none', background: kindCss(r.kind) } }),
+            jsx('span', { style: { fontSize: 12, color: C.t1, wordBreak: 'break-all' }, children: r.path.replace('~/.hermes/', '') }),
+            jsx('span', { style: { marginLeft: 'auto', fontSize: 11.5, color: C.t2, fontFamily: MONO, flex: 'none' }, children: fmt(r.bytes) }),
+          ] }),
+          jsx('div', { style: { fontSize: 11, color: /look first/.test(r.reason) ? C.yellow : C.t3, marginTop: 2 }, children: r.reason }),
+        ] }),
+      ] })
+    }) : jsx('div', { style: { fontSize: 12, color: C.green, padding: '8px 0' }, children: 'Nothing to reclaim. Hermes is tidy.' }),
+    jsx('button', { type: 'button', disabled: !marked.size, onClick: onReview,
+      style: btn({ marginTop: 10, width: '100%', padding: '7px 0', color: marked.size ? '#fff' : C.t4, background: marked.size ? C.red : 'transparent', border: marked.size ? 0 : `1px solid ${C.stroke}`, cursor: marked.size ? 'pointer' : 'default' }),
+      children: marked.size ? `Review ${marked.size} · ${fmt(total)}` : 'Mark items to review' }),
+    jsx('div', { style: { fontSize: 10.5, color: C.t4, marginTop: 6 }, children: 'Never offered: state.db, memories, skills, plugins, config, keys, cron, the Hermes app itself.' }),
+  ] })
+}
+
+function Review({ items, onCancel, onDone }) {
+  const [busy, setBusy] = useState(false), [result, setResult] = useState(null), [err, setErr] = useState(null)
+  const total = items.reduce((s, r) => s + r.bytes, 0)
+  const go = () => {
+    setBusy(true); setErr(null)
+    runFootprint(['trash', ...items.map((r) => r.path)])
+      .then((res) => { setResult(res); rescan() })
+      .catch((e) => setErr(String(e && e.message || e)))
+      .finally(() => setBusy(false))
+  }
+  return jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.72)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 },
+    children: jsxs('div', { style: { width: 'min(560px, 92%)', background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 12, padding: 18, boxShadow: '0 20px 60px rgba(0,0,0,.5)' }, children: [
+      jsx('div', { style: { fontSize: 15, fontWeight: 600, color: C.t1 }, children: result ? 'Done' : `Move ${items.length} item${items.length > 1 ? 's' : ''} to the Trash?` }),
+      jsx('div', { style: { fontSize: 12, color: C.t3, marginTop: 4 }, children: result
+        ? `Freed ${fmt(result.freed_bytes)}. ${fmt(result.free_after)} free now. Restore anything from your file manager's Trash.`
+        : `${fmt(total)} goes to your desktop Trash, not deleted. A fresh scan checks every path again first.` }),
+      jsx('div', { style: { margin: '12px 0', maxHeight: 260, overflow: 'auto' }, children: (result ? result.results : items).map((r) => jsxs('div', {
+        key: r.path, style: { display: 'flex', gap: 8, padding: '6px 0', borderBottom: `1px solid ${C.stroke}`, fontSize: 12 }, children: [
+          jsx('span', { style: { color: result ? (r.ok ? C.green : C.yellow) : C.red, flex: 'none' }, children: result ? (r.ok ? '✓' : '–') : '→' }),
+          jsxs('div', { style: { minWidth: 0, flex: 1 }, children: [
+            jsx('div', { style: { color: C.t1, wordBreak: 'break-all' }, children: r.path }),
+            !result && r.reason ? jsx('div', { style: { color: /look first/.test(r.reason) ? C.yellow : C.t3, fontSize: 11 }, children: r.reason }) : null,
+            result && !r.ok ? jsx('div', { style: { color: C.yellow, fontSize: 11 }, children: r.why }) : null,
+          ] }),
+          jsx('span', { style: { fontFamily: MONO, color: C.t2, flex: 'none' }, children: fmt(r.bytes) }),
+        ] })) }),
+      err ? jsx('div', { style: { color: C.red, fontSize: 12, marginBottom: 8 }, children: err }) : null,
+      jsxs('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' }, children: result
+        ? [jsx('button', { type: 'button', onClick: onDone, style: btn({ color: C.t1 }), children: 'Close' }, 'c')]
+        : [
+          jsx('button', { type: 'button', onClick: onCancel, disabled: busy, style: btn(), children: 'Cancel' }, 'x'),
+          jsx('button', { type: 'button', onClick: go, disabled: busy, style: btn({ background: C.red, color: '#fff', border: 0 }), children: busy ? 'Moving…' : `Move to Trash · ${fmt(total)}` }, 'go'),
+        ] }),
+    ] }) })
+}
+
+function BotsView({ bots }) {
+  const f = bots.files
+  const max = Math.max(1, ...Object.values(f.by_bot))
+  const [showGone, setShowGone] = useState(false)
+  const gone = bots.folders.filter((r) => !r.exists).length
+  const folders = showGone ? bots.folders : bots.folders.filter((r) => r.exists)
+  return jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 280px', gap: 12, flex: 1, minHeight: 0 }, children: [
+    jsxs('div', { style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 10, padding: '10px 12px', overflow: 'auto' }, children: [
+      jsxs('div', { style: { display: 'flex', alignItems: 'center' }, children: [
+        jsx('div', { style: label, children: `Folders your Bots worked in · ${bots.folders.length - gone}` }),
+        gone ? jsx('button', { type: 'button', onClick: () => setShowGone((v) => !v), style: btn({ marginLeft: 'auto', fontSize: 11, padding: '2px 9px' }),
+          children: showGone ? 'Hide removed' : `Show ${gone} removed` }) : null,
+      ] }),
+      jsxs('table', { style: { width: '100%', borderCollapse: 'collapse', marginTop: 6, fontSize: 12 }, children: [
+        jsx('thead', { children: jsx('tr', { style: { color: C.t3, textAlign: 'left', fontSize: 11 }, children: ['Folder', 'Bots', 'Sessions', 'Files written', 'Size', 'Last'].map((h) => jsx('th', { style: { fontWeight: 500, padding: '4px 6px' }, children: h }, h)) }) }),
+        jsx('tbody', { children: folders.map((r) => jsxs('tr', { style: { borderTop: `1px solid ${C.stroke}`, color: r.exists ? C.t2 : C.t4 }, children: [
+          jsx('td', { style: { padding: '6px', color: r.exists ? C.t1 : C.t4, wordBreak: 'break-all' }, children: r.path + (r.exists ? '' : '  (gone)') }),
+          jsx('td', { style: { padding: '6px' }, children: Object.entries(r.bots).map(([b, n]) => jsx('span', { title: `${n} session(s)`, style: { display: 'inline-block', fontSize: 10.5, padding: '1px 6px', margin: '1px 3px 1px 0', borderRadius: 9, border: `1px solid ${C.stroke}`, color: C.t2 }, children: b }, b)) }),
+          jsx('td', { style: { padding: '6px', fontFamily: MONO }, children: r.sessions }),
+          jsx('td', { style: { padding: '6px', fontFamily: MONO }, children: r.files_written ? `${r.files_still_there} of ${r.files_written}` : '—' }),
+          jsx('td', { style: { padding: '6px', fontFamily: MONO }, children: r.exists ? (r.bytes == null ? 'large' : fmt(r.bytes)) : '—' }),
+          jsx('td', { style: { padding: '6px', color: C.t3 }, children: ago(r.last) }),
+        ] }, r.path)) }),
+      ] }),
+    ] }),
+    jsxs('div', { style: { background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 10, padding: '10px 12px', alignSelf: 'start' }, children: [
+      jsx('div', { style: label, children: 'Files your Bots wrote' }),
+      jsx('div', { style: { fontSize: 28, color: C.t1, fontWeight: 600, marginTop: 6 }, children: f.written.toLocaleString() }),
+      jsx('div', { style: { fontSize: 12, color: C.t3 }, children: `${f.still_there} still there (${fmt(f.bytes)}) · ${f.gone} since removed` }),
+      jsx('div', { style: { marginTop: 12 }, children: Object.entries(f.by_bot).map(([b, n]) => jsxs('div', { key: b, style: { display: 'flex', alignItems: 'center', gap: 8, margin: '5px 0', fontSize: 12 }, children: [
+        jsx('span', { style: { width: 64, color: C.t2 }, children: b }),
+        jsx('div', { style: { flex: 1, height: 6, background: C.stroke, borderRadius: 3 }, children: jsx('div', { style: { width: `${(100 * n) / max}%`, height: '100%', borderRadius: 3, background: C.accent } }) }),
+        jsx('span', { style: { width: 32, textAlign: 'right', fontFamily: MONO, color: C.t2 }, children: n }),
+      ] })) }),
+      jsx('div', { style: { fontSize: 10.5, color: C.t4, marginTop: 10 }, children: 'From each Bot\'s own sessions: the folder it started in and every write_file / patch. Shown for knowing, never offered for removal.' }),
+    ] }),
+  ] })
+}
+
+function FootprintPage() {
+  const s = useFootprint()
+  const [tab, setTab] = useState('hermes')
+  const [zoom, setZoom] = useState('')
+  const [marked, setMarked] = useState(() => new Set())
+  const [review, setReview] = useState(false)
+  const d = s.data
+  const root = useMemo(() => d ? withFullPaths(d.hermes, '~/.hermes') : null, [d])
+  const totals = useMemo(() => root ? Object.entries(kindTotals(root)).sort((a, b) => b[1] - a[1]) : [], [root])
+  useEffect(() => { // a fresh scan drops marks that are no longer offered
+    if (!d) return
+    const ok = new Set(d.reclaimable.map((r) => r.path))
+    setMarked((m) => new Set([...m].filter((p) => ok.has(p))))
+  }, [d])
+
+  const toggle = (r) => setMarked((m) => { const n = new Set(m); const p = r.fullPath || r.path; n.has(p) ? n.delete(p) : n.add(p); return n })
+  const head = jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', marginBottom: 12 }, children: [
+    jsxs('div', { children: [
+      jsx('div', { style: { fontSize: 18, fontWeight: 600, color: C.t1 }, children: 'Footprint' }),
+      jsx('div', { style: { fontSize: 12, color: C.t3 }, children: d ? `${d.files_scanned.toLocaleString()} files · scanned in ${d.scan_seconds}s` : s.inflight ? 'Scanning ~/.hermes…' : '' }),
+    ] }),
+    d ? jsx(DiskBar, { disk: d.disk, hermes: d.hermes.bytes, freeing: d.reclaimable.filter((r) => marked.has(r.path)).reduce((a, r) => a + r.bytes, 0) }) : null,
+    jsx('button', { type: 'button', onClick: () => rescan(), disabled: !!s.inflight, style: btn({ marginLeft: 'auto' }), children: s.inflight ? 'Scanning…' : 'Rescan' }),
+  ] })
+  if (!d) {
+    return jsxs('div', { style: { padding: '16px 22px', height: '100%', overflow: 'auto' }, children: [head,
+      s.error ? jsx('div', { style: { color: C.red, fontSize: 12.5 }, children: `Could not read your footprint: ${s.error}. Is the hermes-footprint Python plugin enabled (plugins.enabled in config.yaml)?` }) : null] })
+  }
+  const trail = findPath(root, zoom)
+  const here = trail[trail.length - 1]
+  const tabBtn = (id, text) => jsx('button', { type: 'button', onClick: () => setTab(id),
+    style: btn({ color: tab === id ? C.t1 : C.t3, background: tab === id ? 'color-mix(in srgb, var(--ui-accent, #4a84fe) 16%, transparent)' : 'transparent', borderColor: tab === id ? C.accent : 'transparent' }), children: text }, id)
+
+  return jsxs('div', { style: { position: 'relative', padding: '14px 22px 16px', height: '100%', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }, children: [
+    head,
+    jsxs('div', { style: { display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }, children: [
+      tabBtn('hermes', `Hermes itself · ${fmt(d.hermes.bytes)}`),
+      tabBtn('bots', `Made by your Bots · ${d.bots.files.written} files`),
+      tab === 'hermes' ? jsx('div', { style: { marginLeft: 12, fontSize: 12, color: C.t3, display: 'flex', gap: 4, flexWrap: 'wrap' }, children: trail.map((n, i) => jsxs('span', { key: n.fullPath, children: [
+        i ? ' / ' : '',
+        jsx('button', { type: 'button', onClick: () => setZoom(n.path), style: { background: 'none', border: 0, padding: 0, cursor: 'pointer', color: i === trail.length - 1 ? C.t1 : C.accent, fontSize: 12 }, children: n.name }),
+      ] })) }) : null,
+    ] }),
+    tab === 'bots' ? jsx(BotsView, { bots: d.bots }) : jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 12, flex: 1, minHeight: 0 }, children: [
+      jsxs('div', { style: { display: 'flex', flexDirection: 'column', minHeight: 0 }, children: [
+        jsx(Treemap, { root: here, marked, onOpen: (n) => setZoom(n.path), onToggle: toggle }),
+        jsx('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '4px 14px', marginTop: 8, fontSize: 11, color: C.t3 }, children: [
+          ...totals.map(([k, b]) => jsxs('span', { key: k, style: { display: 'inline-flex', alignItems: 'center', gap: 5 }, children: [
+            jsx('span', { style: { width: 9, height: 9, borderRadius: 2, background: kindCss(k), opacity: 0.85 } }),
+            `${d.kinds[k] || k} `, jsx('span', { style: { fontFamily: MONO, color: C.t2 }, children: fmt(b) }),
+          ] })),
+          jsxs('span', { key: 'hatch', style: { display: 'inline-flex', alignItems: 'center', gap: 5 }, children: [
+            jsx('span', { style: { width: 9, height: 9, borderRadius: 2, background: `repeating-linear-gradient(135deg, ${C.t2} 0 1.5px, transparent 1.5px 4px)` } }), 'hatched = can go',
+          ] }),
+        ] }),
+      ] }),
+      jsx('div', { style: { overflow: 'auto', minHeight: 0 }, children: jsx(WorthALook, { items: d.reclaimable, marked, onToggle: toggle, onReview: () => setReview(true) }) }),
+    ] }),
+    review ? jsx(Review, { items: d.reclaimable.filter((r) => marked.has(r.path)), onCancel: () => setReview(false), onDone: () => { setReview(false); setMarked(new Set()) } }) : null,
+  ] })
+}
+
+function StatusChip() {
+  const s = useFootprint()
+  const d = s.data
+  if (!d) return null
+  const r = d.reclaimable_bytes
+  return jsx('button', {
+    type: 'button', title: 'Open Footprint', onClick: () => host.navigate(ROUTE),
+    style: { background: 'transparent', border: 0, cursor: 'pointer', padding: '0 6px', fontSize: 11, color: r > 1e9 ? C.yellow : C.t3, fontFamily: MONO },
+    children: `▦ Hermes ${fmt(d.hermes.bytes)}${r > 1e8 ? ` · ${fmt(r)} can go` : ''}`,
+  })
+}
+
+export default {
+  id: ID,
+  name: 'Footprint',
+  register(ctx) {
+    ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(FootprintPage, {}) })
+    ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, order: 87, data: { path: ROUTE, label: 'Footprint', codicon: 'database' } })
+    ctx.register({ id: 'open', area: PALETTE_AREA, data: { id: `${ID}.open`, label: 'Open Footprint', keywords: ['footprint', 'disk', 'storage', 'space', 'cleanup', 'treemap'], run: () => host.navigate(ROUTE) } })
+    ctx.register({ id: 'statusbar', area: STATUSBAR_AREAS.right, order: 132, render: () => jsx(StatusChip, {}) })
+  },
+}

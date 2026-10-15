@@ -1,0 +1,12 @@
+name: hermes-footprint
+version: "0.1.0"
+manifest_version: 2
+api_version: 1
+description: "What your Hermes Agent has left on your disk, inside Hermes Desktop: a treemap of ~/.hermes coloured by what each folder is to Hermes, the folders and files your Bots made, and what can safely go. Review first, then Move to Trash; never a permanent delete."
+author: Bikash Joshi
+license: MIT
+homepage: https://github.com/BkashJEE/hermes-footprint
+tags: [desktop, disk, storage, cleanup, treemap]
+requires_hermes: ">=0.21.5"
+provides_commands:
+  - footprint

@@ -1,0 +1,62 @@
+"""``hermes footprint`` CLI command and ``/footprint`` slash command.
+
+The desktop page runs ``hermes --profile <p> footprint --json`` through the gateway's ``cli.exec``
+RPC, and ``footprint trash PATH... --json`` after the user has reviewed and confirmed a list.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+from . import footprint_data as data
+
+
+def gb(b) -> str:
+    return f"{(b or 0) / 1e9:.2f} GB"
+
+
+def render_text(d: dict) -> str:
+    h = d["hermes"]
+    lines = [f"Hermes uses {gb(h['bytes'])} in {d['files_scanned']:,} files ({gb(d['disk']['free'])} free on this disk).", ""]
+    for c in [c for c in h.get("children", []) if not c.get("rest")][:8]:
+        lines.append(f"  {gb(c['bytes']):>9}  {c['name']}  ({d['kinds'].get(c['kind'], c['kind'])})")
+    if d["reclaimable"]:
+        lines += ["", f"Worth a look: {gb(d['reclaimable_bytes'])} in {len(d['reclaimable'])} place(s)"]
+        lines += [f"  {gb(r['bytes']):>9}  {r['path']}  — {r['reason']}" for r in d["reclaimable"][:6]]
+    f = d["bots"]["files"]
+    lines += ["", f"Your Bots worked in {len(d['bots']['folders'])} folder(s) and wrote {f['written']} file(s); "
+                  f"{f['still_there']} are still there."]
+    lines += ["", "Open Footprint in Hermes Desktop to review and move items to the trash."]
+    return "\n".join(lines)
+
+
+def slash_command(raw_args: str) -> str:
+    return render_text(data.collect())
+
+
+def setup_argparse(subparser) -> None:
+    subparser.add_argument("action", nargs="?", choices=["scan", "trash"], default="scan")
+    subparser.add_argument("paths", nargs="*", help="With trash: ~/.hermes/... paths the scan marked reclaimable")
+    subparser.add_argument("--json", action="store_true", help="Emit JSON for the desktop page")
+    subparser.set_defaults(func=handle_cli)
+
+
+def handle_cli(args) -> None:
+    try:
+        if getattr(args, "action", "scan") == "trash":
+            payload = data.trash(list(getattr(args, "paths", []) or []))
+        else:
+            payload = data.collect()
+    except Exception as e:  # the page shows this instead of crashing
+        payload = {"error": f"footprint failed: {type(e).__name__}: {e}"}
+    if getattr(args, "json", False):
+        sys.stdout.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
+    elif "error" in payload:
+        print(payload["error"])
+    elif "results" in payload:
+        for r in payload["results"]:
+            print(("moved to trash  " if r["ok"] else "skipped  ") + r["path"] + ("" if r["ok"] else f"  ({r['why']})"))
+        print(f"Freed {gb(payload['freed_bytes'])}; {gb(payload['free_after'])} free now.")
+    else:
+        print(render_text(payload))

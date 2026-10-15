@@ -1,0 +1,347 @@
+"""Hermes Footprint: what your Hermes Agent has left on your disk, and what can go.
+
+Two roots, laid out as one treemap in the Desktop page:
+
+  * Hermes itself — ~/.hermes, walked like dust/disktree: allocated blocks, hardlinks counted
+    once, never crossing into another mounted filesystem. Folders are coloured by what they are
+    *to Hermes* (app, toolchains, a Bot's memory, worktrees, backups, browser profiles, caches),
+    which a generic disk tool cannot tell apart.
+  * Made by your Bots — the folders Bots worked in (each session records its cwd and git repo)
+    and the files they wrote with write_file / patch, with which Bot, how many sessions and when.
+
+Read-only. The removal half (``trash()``) only ever moves a path the latest scan itself marked
+reclaimable to the desktop trash, after the user has reviewed the list; nothing is deleted
+permanently and nothing a Bot needs to run (state.db, memories, skills, plugins, config, keys) can
+be marked. Message text never leaves this module: only paths, sizes, times and counts.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import sqlite3
+import stat as st
+import subprocess
+import time
+from collections import Counter, defaultdict
+from pathlib import Path
+
+DAY = 86400
+KEEP_TOP = 16          # children kept per directory in the payload; the rest fold into one tile
+MIN_SHARE = 0.006      # and anything under this share of its parent folds too
+MAX_DEPTH = 5
+BACKUP_AGE = 14 * DAY  # backups older than this are reclaimable, except the newest two
+STALE_AGE = 30 * DAY   # worktrees, checkpoints and snapshots untouched this long
+
+# What a folder is to Hermes. Order matters: first match on the path relative to ~/.hermes wins.
+KIND_RULES = [
+    (r"(^|/)node_modules(/|$)|(^|/)(venv|\.venv)(/|$)", "toolchain"),
+    (r"^hermes-agent(/|$)", "app"),
+    (r"^(installs|tools|bin|lsp|pet-builds)(/|$)", "toolchain"),
+    (r"(^|/)(worktrees)(/|$)", "worktree"),
+    (r"(^|/)(backups|state-snapshots|checkpoints|profile-exports)(/|$)|^profiles-backup", "backup"),
+    (r"(^|/)(browser-profile[^/]*|bot-desktop|browser-github)(/|$)", "browser"),
+    (r"(^|/)(cache|audio_cache|logs|tmp)(/|$)", "cache"),
+    (r"(^|/)(state\.db[^/]*|memories|sessions|cron)(/|$)", "memory"),
+    (r"(^|/)(skills|plugins|desktop-plugins|plugin-data)(/|$)", "skills"),
+    (r"^profiles(/|$)", "bot"),
+]
+KIND_RULES = [(re.compile(rx), k) for rx, k in KIND_RULES]
+KINDS = {
+    "app": "Hermes app", "toolchain": "Toolchains & installs", "bot": "Bot (other)", "memory": "Bot memory & sessions",
+    "skills": "Skills & plugins", "worktree": "Worktrees", "backup": "Backups & snapshots", "browser": "Browser profiles",
+    "cache": "Caches & logs", "other": "Other", "workspace": "Made by your Bots",
+}
+# Never offered for removal, whatever the rules say: what a Bot needs to run.
+PROTECTED = re.compile(r"(^|/)(state\.db[^/]*|memories|skills|plugins|desktop-plugins|config\.yaml|auth\.json|auth\.lock|\.env|"
+                       r"profile\.yaml|SOUL\.md|cron|hermes-agent)(/|$)")
+
+
+def hermes_root() -> Path:
+    env = os.environ.get("HERMES_HOME")
+    root = Path(env) if env else Path.home() / ".hermes"
+    if root.parent.name == "profiles":
+        root = root.parent.parent
+    return root
+
+
+def kind_of(rel: str) -> str:
+    for rx, k in KIND_RULES:
+        if rx.search(rel):
+            return k
+    return "other"
+
+
+class Walker:
+    """dust's shape, single-threaded: walk once, aggregate bottom-up, dedupe hardlinks."""
+
+    def __init__(self, dev: int):
+        self.dev = dev
+        self.seen: set = set()
+        self.files = 0
+
+    def walk(self, path: str) -> dict:
+        node = {"name": os.path.basename(path) or path, "bytes": 0, "files": 0, "mtime": 0.0, "children": [], "_abs": path}
+        try:
+            it = os.scandir(path)
+        except OSError:
+            return node
+        with it:
+            for e in it:
+                try:
+                    s = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if st.S_ISDIR(s.st_mode):
+                    if s.st_dev != self.dev or os.path.ismount(e.path):
+                        continue  # never enter another filesystem
+                    child = self.walk(e.path)
+                    node["children"].append(child)
+                    node["bytes"] += child["bytes"]; node["files"] += child["files"]
+                    node["mtime"] = max(node["mtime"], child["mtime"], s.st_mtime)
+                elif st.S_ISREG(s.st_mode) or st.S_ISLNK(s.st_mode):
+                    if s.st_nlink > 1:
+                        key = (s.st_dev, s.st_ino)
+                        if key in self.seen:
+                            continue
+                        self.seen.add(key)
+                    size = s.st_blocks * 512
+                    self.files += 1
+                    node["files"] += 1; node["bytes"] += size
+                    node["mtime"] = max(node["mtime"], s.st_mtime)
+                    node.setdefault("_files", []).append((e.name, size, s.st_mtime))
+        return node
+
+
+# Folders whose contents are rebuilt on demand. Never a whole folder just because it is called "cache".
+REBUILDABLE = {
+    "uv": "package cache (uv): rebuilt when needed", "pip": "package cache (pip): rebuilt when needed",
+    "_cacache": "package cache (npm): rebuilt when needed", "__pycache__": "compiled Python: rebuilt when needed",
+    "Cache": "browser cache: rebuilt when needed", "Code Cache": "browser cache: rebuilt when needed",
+    "GPUCache": "browser cache: rebuilt when needed", "ShaderCache": "browser cache: rebuilt when needed",
+    "Crashpad": "crash reports",
+}
+
+
+# Toolchains Hermes installs and expects to find (language servers, runtimes): not ours to offer.
+HERMES_MANAGED = re.compile(r"^(profiles/[^/]+/)?(lsp|tools|installs|bin)/")
+
+
+def git_dirty(path: str | None) -> int:
+    if not path:
+        return 0
+    try:
+        run = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True, timeout=20)
+        return len([l for l in run.stdout.splitlines() if l.strip()]) if run.returncode == 0 else 0
+    except (OSError, subprocess.SubprocessError):
+        return 0
+
+
+def reclaim_reason(rel: str, node: dict, siblings: list, parent_rel: str, now: float, sib_files: set = frozenset()) -> str | None:
+    """Why this folder's space can be had back, or None. Name *and* context, like disktree."""
+    if PROTECTED.search(rel):
+        return None
+    name = node["name"]
+    age = now - node["mtime"] if node["mtime"] else 0
+    sib = {s["name"] for s in siblings} | set(sib_files)
+    if name == "node_modules" and "package.json" in sib and not HERMES_MANAGED.search(rel):
+        return "reinstallable (npm install brings it back)"
+    if name in REBUILDABLE:
+        return REBUILDABLE[name]
+    parent = os.path.basename(parent_rel)
+    if parent in ("backups", "profile-exports") or name.startswith("profiles-backup"):
+        newest = sorted((s for s in siblings), key=lambda s: -s["mtime"])[:2]
+        if age > BACKUP_AGE and node not in newest:
+            return f"backup from {int(age // DAY)} days ago (the newest two are kept)"
+    if parent in ("checkpoints", "state-snapshots") and age > STALE_AGE:
+        return f"snapshot untouched for {int(age // DAY)} days"
+    if parent == "worktrees" and age > STALE_AGE:
+        dirty = git_dirty(node.get("_abs"))
+        return (f"worktree untouched for {int(age // DAY)} days" + (f"; it has {dirty} uncommitted or untracked item(s), look first" if dirty else "")
+                + " (then run git worktree prune in its repo)")
+    if name == "pet-builds":
+        return "build output"
+    return None
+
+
+def shape(node: dict, rel: str, depth: int, now: float, parent_rel: str = "", siblings: list | None = None,
+          sib_files: set = frozenset()) -> dict:
+    """Turn the raw walk into the payload: kinds, reclaim reasons, folding of small items."""
+    kind = kind_of(rel) if rel else "other"
+    out = {"name": node["name"], "path": rel, "bytes": node["bytes"], "files": node["files"], "mtime": node["mtime"], "kind": kind}
+    if rel:
+        why = reclaim_reason(rel, node, siblings or [], parent_rel, now, sib_files)
+        if why:
+            out["reclaim"] = why
+    kids = sorted(node["children"], key=lambda c: -c["bytes"])
+    files = sorted(node.get("_files", []), key=lambda f: -f[1])
+    entries = [("dir", c) for c in kids] + [("file", f) for f in files]
+    entries.sort(key=lambda e: -(e[1]["bytes"] if e[0] == "dir" else e[1][1]))
+    keep, rest_b, rest_n = [], 0, 0
+    for i, (t, x) in enumerate(entries):
+        size = x["bytes"] if t == "dir" else x[1]
+        if depth < MAX_DEPTH and i < KEEP_TOP and node["bytes"] and size / node["bytes"] >= MIN_SHARE:
+            keep.append((t, x))
+        else:
+            rest_b += size; rest_n += 1
+    children = []
+    for t, x in keep:
+        if t == "dir":
+            crel = f"{rel}/{x['name']}" if rel else x["name"]
+            if "reclaim" in out:  # a reclaimable folder is one tile: its insides don't matter
+                continue
+            children.append(shape(x, crel, depth + 1, now, rel, kids, {f[0] for f in files}))
+        else:
+            name, size, mtime = x
+            crel = f"{rel}/{name}" if rel else name
+            children.append({"name": name, "path": crel, "bytes": size, "files": 1, "mtime": mtime, "kind": kind_of(crel), "file": True})
+    if rest_n and "reclaim" not in out:
+        children.append({"name": f"{rest_n:,} smaller items", "path": rel, "bytes": rest_b, "files": 0, "mtime": 0, "kind": kind, "rest": True})
+    if children and "reclaim" not in out:
+        out["children"] = children
+    return out
+
+
+def reclaimables(tree: dict, prefix: str) -> list:
+    found = []
+
+    def go(n):
+        if n.get("reclaim"):
+            found.append({"path": f"{prefix}/{n['path']}" if n["path"] else prefix, "bytes": n["bytes"], "reason": n["reclaim"],
+                          "kind": n["kind"], "mtime": n["mtime"]})
+            return
+        for c in n.get("children", []):
+            go(c)
+    go(tree)
+    return sorted(found, key=lambda r: -r["bytes"])
+
+
+def bot_work(root: Path, home: Path) -> dict:
+    """Folders Bots worked in and files they wrote, from every profile's session database."""
+    folders = defaultdict(lambda: {"bots": Counter(), "sessions": 0, "last": 0.0})
+    written = defaultdict(set)
+    homes = [("default", root)] + [(p.name, p) for p in sorted((root / "profiles").iterdir()) if p.is_dir()] if (root / "profiles").is_dir() else [("default", root)]
+    for bot, ph in homes:
+        db = ph / "state.db"
+        if not db.exists():
+            continue
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            cols = {r[1] for r in c.execute("pragma table_info(sessions)")}
+            if {"cwd", "git_repo_root"} <= cols:
+                for cwd, repo, ts in c.execute("select cwd, git_repo_root, coalesce(last_activity_at, started_at) from sessions"):
+                    where = repo or cwd
+                    if not where:
+                        continue
+                    f = folders[where]; f["bots"][bot] += 1; f["sessions"] += 1; f["last"] = max(f["last"], float(ts or 0))
+            for (tc,) in c.execute("select tool_calls from messages where role='assistant' and "
+                                   "(tool_calls like '%write_file%' or tool_calls like '%\"patch\"%')"):
+                try:
+                    calls = json.loads(tc)
+                except (TypeError, ValueError):
+                    continue
+                for call in calls if isinstance(calls, list) else []:
+                    fn = call.get("function") or call
+                    if fn.get("name") not in ("write_file", "patch"):
+                        continue
+                    a = fn.get("arguments")
+                    try:
+                        a = json.loads(a) if isinstance(a, str) else (a or {})
+                    except ValueError:
+                        continue
+                    p = a.get("path") or a.get("file_path") if isinstance(a, dict) else None
+                    if p:
+                        written[os.path.expanduser(str(p))].add(bot)
+            c.close()
+        except sqlite3.Error:
+            continue
+    hroot = str(root)
+    out = []
+    for where, f in folders.items():
+        if where in (str(home), "/", hroot) or where.startswith(hroot + "/"):
+            continue  # home itself and Hermes' own folder are covered by the other root
+        exists = os.path.isdir(where)
+        files_in = [p for p in written if p.startswith(where.rstrip("/") + "/")]
+        out.append({"path": where.replace(str(home), "~", 1), "bots": dict(f["bots"].most_common()), "sessions": f["sessions"],
+                    "last": f["last"], "exists": exists, "files_written": len(files_in),
+                    "files_still_there": sum(1 for p in files_in if os.path.isfile(p))})
+    still = [p for p in written if os.path.isfile(p)]
+    return {"folders": sorted(out, key=lambda x: -x["sessions"]),
+            "files": {"written": len(written), "still_there": len(still), "gone": len(written) - len(still),
+                      "bytes": sum(os.path.getsize(p) for p in still),
+                      "by_bot": dict(Counter(b for p in still for b in written[p]).most_common())}}
+
+
+def du(path: str, dev: int, limit_s: float = 4.0) -> int | None:
+    """Allocated bytes under path, or None when it takes too long (huge or unreadable)."""
+    t0, total, seen, stack = time.time(), 0, set(), [path]
+    while stack:
+        if time.time() - t0 > limit_s:
+            return None
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    try:
+                        s = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if st.S_ISDIR(s.st_mode):
+                        if s.st_dev == dev:
+                            stack.append(e.path)
+                    else:
+                        if s.st_nlink > 1:
+                            if (s.st_dev, s.st_ino) in seen:
+                                continue
+                            seen.add((s.st_dev, s.st_ino))
+                        total += s.st_blocks * 512
+        except OSError:
+            continue
+    return total
+
+
+def collect(root: Path | None = None, now: float | None = None) -> dict:
+    root = Path(root) if root else hermes_root()
+    home = Path.home()
+    now = time.time() if now is None else now
+    t0 = time.time()
+    dev = os.stat(root).st_dev
+    w = Walker(dev)
+    raw = w.walk(str(root))
+    raw["name"] = "~/.hermes"
+    tree = shape(raw, "", 0, now)
+    work = bot_work(root, home)
+    for f in work["folders"]:
+        if f["exists"]:
+            f["bytes"] = du(os.path.expanduser(f["path"]), os.stat(os.path.expanduser(f["path"])).st_dev)
+    total = shutil.disk_usage(str(root))
+    rec = reclaimables(tree, "~/.hermes")
+    return {
+        "generated_at": now, "scan_seconds": round(time.time() - t0, 2), "files_scanned": w.files,
+        "disk": {"total": total.total, "used": total.used, "free": total.free},
+        "hermes": tree, "kinds": KINDS, "reclaimable": rec, "reclaimable_bytes": sum(r["bytes"] for r in rec),
+        "bots": work, "privacy": "read-only; paths, sizes, times and counts only, no message text",
+    }
+
+
+# ── removal: reviewed paths to the desktop trash, never a permanent delete ──────────────────────
+def trash(paths: list[str], root: Path | None = None) -> dict:
+    """Move each path to the trash, but only if a fresh scan marks it reclaimable."""
+    root = Path(root) if root else hermes_root()
+    allowed = {r["path"]: r for r in reclaimables(shape(Walker(os.stat(root).st_dev).walk(str(root)), "", 0, time.time()), "~/.hermes")}
+    tool = shutil.which("gio") and ["gio", "trash", "--"] or shutil.which("trash-put") and ["trash-put", "--"]
+    results = []
+    for p in paths:
+        if p not in allowed:
+            results.append({"path": p, "ok": False, "why": "not marked reclaimable by a fresh scan"}); continue
+        real = str(root) + p[len("~/.hermes"):]
+        if PROTECTED.search(p) or not real.startswith(str(root) + "/"):
+            results.append({"path": p, "ok": False, "why": "protected"}); continue
+        if not tool:
+            results.append({"path": p, "ok": False, "why": "no trash tool (gio or trash-put) found"}); continue
+        run = subprocess.run(tool + [real], capture_output=True, text=True, timeout=120)
+        results.append({"path": p, "ok": run.returncode == 0, "bytes": allowed[p]["bytes"],
+                        "why": None if run.returncode == 0 else (run.stderr.strip().splitlines() or ["failed"])[-1]})
+    return {"results": results, "freed_bytes": sum(r.get("bytes", 0) for r in results if r["ok"]),
+            "free_after": shutil.disk_usage(str(root)).free}

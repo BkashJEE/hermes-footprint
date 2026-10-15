@@ -1,0 +1,25 @@
+<!doctype html><html><head><meta charset="utf-8"><title>hermes-footprint harness</title>
+<script type="importmap">{"imports":{"react":"https://esm.sh/react@19.1.0","react/jsx-runtime":"https://esm.sh/react@19.1.0/jsx-runtime","react-dom/client":"https://esm.sh/react-dom@19.1.0/client?deps=react@19.1.0","@hermes/plugin-sdk":"./mock-sdk.js"}}</script>
+<style>
+/* Nous dark values (apps/shared/src/theme-presets.ts darkColors + darkTerminal) */
+:root{--ui-accent:#4a84fe;--ui-red:#ff7b72;--ui-yellow:#d29922;--ui-green:#3fb950;--ui-cyan:#39c5cf;--ui-purple:#bc8cff;--ui-orange:#ffa657;
+--ui-text-primary:#e6edf3;--ui-text-secondary:#b1bac4;--ui-text-tertiary:#7d8590;--ui-text-quaternary:#6e7681;--ui-stroke-tertiary:#21262d;--ui-bg-elevated:#010409}
+body{margin:0;background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif}
+.app{display:flex;height:calc(100vh - 24px)}.side{width:200px;background:#010409;border-right:1px solid #21262d;padding:14px 10px;font-size:13px;color:#b1bac4}
+.side div{padding:6px 10px;border-radius:6px}.side .on{background:#161b22;color:#fff}#root{flex:1;min-width:0}
+.bar{position:fixed;bottom:0;left:0;right:0;height:24px;background:#010409;border-top:1px solid #21262d;display:flex;justify-content:flex-end;align-items:center;padding-right:10px}
+</style></head><body>
+<div class="app"><div class="side"><div>Sessions</div><div>Skills</div><div>Activity</div><div class="on">▦ Footprint</div><div>Settings</div></div><div id="root"></div></div>
+<div class="bar" id="chip"></div>
+<script type="module">
+import { createRoot } from 'react-dom/client'
+import { jsx } from 'react/jsx-runtime'
+import plugin from '../desktop/plugin.js'
+const reg = []
+const ctx = { register: (c) => { reg.push(c); return () => {} }, setInterval: (f, ms) => { const t = setInterval(f, ms); return () => clearInterval(t) },
+  addEventListener: (t, e, f) => { t.addEventListener(e, f); return () => t.removeEventListener(e, f) } }
+plugin.register(ctx)
+window.__registered = reg.map((c) => ({ id: c.id, area: c.area, data: c.data && { path: c.data.path, label: c.data.label } }))
+createRoot(document.getElementById('root')).render(reg.find((c) => c.area === 'routes').render())
+createRoot(document.getElementById('chip')).render(reg.find((c) => c.area === 'statusBar.right').render())
+</script></body></html>
