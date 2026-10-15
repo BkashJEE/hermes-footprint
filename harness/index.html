@@ -22,4 +22,12 @@ plugin.register(ctx)
 window.__registered = reg.map((c) => ({ id: c.id, area: c.area, data: c.data && { path: c.data.path, label: c.data.label } }))
 createRoot(document.getElementById('root')).render(reg.find((c) => c.area === 'routes').render())
 createRoot(document.getElementById('chip')).render(reg.find((c) => c.area === 'statusBar.right').render())
+// ?view=bots | deck | deck-end | confirm : clicks through the real page for README screenshots.
+const view = new URLSearchParams(location.search).get('view')
+const click = (re) => [...document.querySelectorAll('button')].find((b) => re.test(b.textContent))?.click()
+const key = (k) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k }))
+const steps = { bots: [() => click(/^Made by your Bots/)], deck: [() => click(/^Review one by one/)],
+  'deck-end': [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t')],
+  confirm: [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => click(/^Next: confirm/)] }
+if (view && steps[view]) { try { localStorage.clear() } catch {}; steps[view].forEach((f, i) => setTimeout(f, 1500 + i * 120)) }
 </script></body></html>

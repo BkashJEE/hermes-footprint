@@ -352,7 +352,7 @@ function Deck({ items, onDone, onCancel }) {
     return () => window.removeEventListener('keydown', onKey)
   })
   const trash = items.filter((x) => picks[x.path] === 'trash'), keep = items.filter((x) => picks[x.path] === 'keep')
-  const shell = (children) => jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.78)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 }, children })
+  const shell = (children) => jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.86)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 }, children })
   if (!r) {
     const freed = trash.reduce((a, x) => a + x.bytes, 0)
     return shell(jsxs('div', { style: { width: 'min(460px, 92%)', background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 14, padding: 22, textAlign: 'center' }, children: [
@@ -448,7 +448,7 @@ function Review({ items, onCancel, onDone }) {
       .catch((e) => setErr(String(e && e.message || e)))
       .finally(() => setBusy(false))
   }
-  return jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.72)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 },
+  return jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.86)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 },
     children: jsxs('div', { style: { width: 'min(560px, 92%)', background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 12, padding: 18, boxShadow: '0 20px 60px rgba(0,0,0,.5)' }, children: [
       jsx('div', { style: { fontSize: 15, fontWeight: 600, color: C.t1 }, children: result ? 'Done' : `Move ${items.length} item${items.length > 1 ? 's' : ''} to the Trash?` }),
       jsx('div', { style: { fontSize: 12, color: C.t3, marginTop: 4 }, children: result
