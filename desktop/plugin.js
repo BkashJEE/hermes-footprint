@@ -465,27 +465,70 @@ function CatalogCard({ icon, title, subtitle, label: lbl = 'What it is', bullets
     ] })
 }
 
-function CardsView({ items, marked, onReview, onTrashMarked, keptCount, onShowKept }) {
+// One thing that can go: size is the hero, safety is the colour, Keep / Trash are right there.
+function GoCard({ r, share, marked, onToggle, onDetails }) {
+  const sf = safety(r), w = whatItIs(r)
+  const edge = marked ? C.red : sf.color
+  return jsxs('div', {
+    style: { position: 'relative', display: 'flex', flexDirection: 'column', background: C.panel, borderRadius: 12, padding: '14px 14px 12px 17px', overflow: 'hidden',
+      border: `1px solid ${marked ? C.red : C.stroke}`, transition: 'border-color .12s, transform .12s' },
+    onMouseEnter: (e) => { e.currentTarget.style.transform = 'translateY(-2px)' }, onMouseLeave: (e) => { e.currentTarget.style.transform = '' },
+    children: [
+      jsx('div', { style: { position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, background: edge } }),
+      jsxs('div', { style: { display: 'flex', gap: 10, alignItems: 'center' }, children: [
+        jsx(IconTile, { kind: r.kind, size: 34 }),
+        jsxs('div', { style: { minWidth: 0, flex: 1 }, children: [
+          jsx('div', { style: { fontSize: 14.5, fontWeight: 650, color: C.t1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, title: w.title, children: w.title }),
+          jsx('div', { style: { fontSize: 11, color: C.t3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }, title: r.path, children: r.path.replace('~/.hermes/', '') }),
+        ] }),
+      ] }),
+      jsxs('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 12 }, children: [
+        jsx('span', { style: { fontSize: 30, fontWeight: 650, color: C.t1, fontFamily: MONO, letterSpacing: '-.02em' }, children: fmt(r.bytes) }),
+        jsx('span', { style: { fontSize: 11.5, color: C.t3 }, children: `${share < 1 ? '<1' : Math.round(share)}% of what can go` }),
+        jsx('span', { style: { marginLeft: 'auto', alignSelf: 'center', flex: 'none', fontSize: 10, fontWeight: 700, letterSpacing: '.07em', color: marked ? C.red : sf.color,
+          border: `1px solid ${marked ? C.red : sf.color}`, borderRadius: 20, padding: '2px 8px' }, children: marked ? 'TRASH' : sf.label }),
+      ] }),
+      jsx('div', { style: { height: 4, borderRadius: 2, background: C.stroke, marginTop: 6 }, children:
+        jsx('div', { style: { width: `${Math.max(1.5, share)}%`, height: '100%', borderRadius: 2, background: edge } }) }),
+      jsx('ul', { style: { margin: '10px 0 0', paddingLeft: 16, fontSize: 12.5, lineHeight: 1.45, color: C.t2 }, children: w.bullets.map((b, i) => jsx('li', { children: b }, i)) }),
+      jsxs('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 12 }, children: [
+        jsx('button', { type: 'button', onClick: () => marked && onToggle(r), style: btn({ padding: '5px 12px', color: marked ? C.t2 : C.t1, borderColor: marked ? C.stroke : C.t4 }), children: 'Keep' }),
+        jsx('button', { type: 'button', onClick: () => !marked && onToggle(r),
+          style: btn({ padding: '5px 12px', color: marked ? '#fff' : C.t2, background: marked ? C.red : 'transparent', border: marked ? 0 : `1px solid ${C.stroke}` }), children: marked ? '✓ Trash' : 'Trash' }),
+        jsx('button', { type: 'button', onClick: onDetails, style: { marginLeft: 'auto', background: 'none', border: 0, color: C.t2, fontSize: 12.5, cursor: 'pointer' }, children: 'Details  →' }),
+      ] }),
+    ] })
+}
+
+function CardsView({ items, marked, onToggle, onReview, onTrashMarked, keptCount, onShowKept }) {
   const total = items.reduce((a, r) => a + r.bytes, 0)
   const markedItems = items.filter((r) => marked.has(r.path))
-  const pretty = { SAFE: 'Safe to trash', 'LOOK FIRST': 'Look first', CHECK: 'Check first' }
-  return jsxs('div', { style: { flex: 1, minHeight: 0, overflow: 'auto' }, children: [
-    jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }, children: [
-      jsx('div', { style: { fontSize: 13, color: C.t2 }, children: items.length ? `${items.length} things can go · ${fmt(total)}` : 'Nothing can go right now.' }),
-      keptCount ? jsx('button', { type: 'button', onClick: onShowKept, style: { background: 'none', border: 0, color: C.t3, fontSize: 12, cursor: 'pointer' }, children: `${keptCount} kept · show` }) : null,
-      items.length ? jsx('button', { type: 'button', onClick: () => onReview(0), style: btn({ marginLeft: 'auto', color: C.t1 }), children: 'Review all one by one' }) : null,
-      markedItems.length ? jsx('button', { type: 'button', onClick: onTrashMarked, style: btn({ background: C.red, color: '#fff', border: 0 }),
-        children: `Move ${markedItems.length} to Trash · ${fmt(markedItems.reduce((a, r) => a + r.bytes, 0))}` }) : null,
+  const markedBytes = markedItems.reduce((a, r) => a + r.bytes, 0)
+  const safeBytes = items.filter((r) => safety(r).label === 'SAFE').reduce((a, r) => a + r.bytes, 0)
+  const summary = jsxs('div', { style: { gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', background: C.panel,
+    border: `1px solid ${C.stroke}`, borderRadius: 12, padding: '14px 16px' }, children: [
+    jsxs('div', { children: [
+      jsx('div', { style: label, children: 'Can go' }),
+      jsx('div', { style: { fontSize: 34, fontWeight: 650, color: C.t1, fontFamily: MONO, letterSpacing: '-.02em', lineHeight: 1.15 }, children: fmt(total) }),
+      jsx('div', { style: { fontSize: 12, color: C.t3 }, children: `${items.length} item${items.length === 1 ? '' : 's'} · ${fmt(safeBytes)} safe to trash · ${fmt(total - safeBytes)} to look at first` }),
     ] }),
-    jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: 12 }, children: items.map((r, i) => {
-      const sf = safety(r)
-      const w = whatItIs(r)
-      return jsx(CatalogCard, { key: r.path, icon: jsx(IconTile, { kind: r.kind }), title: w.title,
-        subtitle: `${fmt(r.bytes)} · ${r.path.replace('~/.hermes/', '')}`, bullets: w.bullets,
-        badge: { label: marked.has(r.path) ? 'Marked for Trash' : pretty[sf.label], color: marked.has(r.path) ? C.red : sf.color },
-        action: 'Review', onAction: () => onReview(i), marked: marked.has(r.path) })
-    }) }),
+    jsxs('div', { style: { flex: 1, minWidth: 240 }, children: [
+      jsx('div', { style: { display: 'flex', height: 12, borderRadius: 6, overflow: 'hidden', gap: 2 }, children: items.map((r) => jsx('div', { key: r.path, title: `${whatItIs(r).title} · ${fmt(r.bytes)}`,
+        style: { flex: `${Math.max(r.bytes, total * 0.004)} 0 0`, background: marked.has(r.path) ? C.red : safety(r).color, opacity: marked.has(r.path) ? 1 : 0.75 } })) }),
+      jsx('div', { style: { fontSize: 11.5, color: markedItems.length ? C.red : C.t3, marginTop: 6 }, children: markedItems.length ? `${markedItems.length} marked · ${fmt(markedBytes)} goes to the Trash when you confirm` : 'Mark cards with Trash, or review them one by one.' }),
+    ] }),
+    jsxs('div', { style: { display: 'flex', gap: 8, alignItems: 'center' }, children: [
+      keptCount ? jsx('button', { type: 'button', onClick: onShowKept, style: { background: 'none', border: 0, color: C.t3, fontSize: 12, cursor: 'pointer' }, children: `${keptCount} kept · show` }) : null,
+      jsx('button', { type: 'button', onClick: () => onReview(0), style: btn({ color: C.t1, padding: '6px 12px' }), children: 'Review one by one' }),
+      jsx('button', { type: 'button', disabled: !markedItems.length, onClick: onTrashMarked,
+        style: btn({ padding: '6px 12px', background: markedItems.length ? C.red : 'transparent', color: markedItems.length ? '#fff' : C.t4, border: markedItems.length ? 0 : `1px solid ${C.stroke}`, cursor: markedItems.length ? 'pointer' : 'default' }),
+        children: markedItems.length ? `Move to Trash · ${fmt(markedBytes)}` : 'Move to Trash' }),
+    ] }),
   ] })
+  return jsx('div', { style: { flex: 1, minHeight: 0, overflow: 'auto' }, children: items.length
+    ? jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 12 }, children: [summary,
+      ...items.map((r, i) => jsx(GoCard, { key: r.path, r, share: (100 * r.bytes) / total, marked: marked.has(r.path), onToggle, onDetails: () => onReview(i) }))] })
+    : jsx('div', { style: { color: C.green, fontSize: 13 }, children: 'Nothing can go right now. Hermes is tidy.' }) })
 }
 
 function DiskBar({ disk, hermes, freeing }) {
@@ -713,7 +756,7 @@ function FootprintPage() {
         jsx('button', { type: 'button', onClick: () => setZoom(n.path), style: { background: 'none', border: 0, padding: 0, cursor: 'pointer', color: i === trail.length - 1 ? C.t1 : C.accent, fontSize: 12 }, children: n.name }),
       ] })) }) : null,
     ] }),
-    tab === 'cards' ? jsx(CardsView, { items: showKept ? d.reclaimable : open, marked, keptCount: d.reclaimable.length - open.length,
+    tab === 'cards' ? jsx(CardsView, { items: showKept ? d.reclaimable : open, marked, onToggle: toggle, keptCount: d.reclaimable.length - open.length,
       onShowKept: () => setShowKept((v) => !v), onReview: (i) => setDeck({ start: i }), onTrashMarked: () => setReview(true) }) :
     tab === 'bots' ? jsx(BotsView, { bots: d.bots, root, onOpen: (n) => { setZoom(n.path); setTab('hermes') } }) : jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 12, flex: 1, minHeight: 0 }, children: [
       jsxs('div', { style: { display: 'flex', flexDirection: 'column', minHeight: 0 }, children: [
