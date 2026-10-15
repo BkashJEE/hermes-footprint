@@ -50,6 +50,13 @@ Tobi Lütke [wondered where his disk space went](https://x.com/tobi/status/21032
 - **No message text** leaves the plugin: only paths, sizes, times and counts.
 - **This machine only.** It always scans the computer it runs on, never a remote connection.
 
+## Linux, macOS and Windows
+
+- **Sizes:** allocated blocks on Linux and macOS (what `du` reports); on Windows, where Python has no block count, the file's apparent size.
+- **Trash:** `send2trash` when the host Python has it; otherwise `gio trash` or `trash-cli` on Linux, the Finder on macOS, the Recycle Bin on Windows. Never a permanent delete.
+- **Open:** `gio open` / `xdg-open`, `open`, or Explorer.
+- Paths are compared as real paths, never as string prefixes, so a sibling folder that shares a name (`~/.hermes2`) is never inside `~/.hermes`.
+
 ## Footprint and the built-in `disk-cleanup` plugin
 
 Hermes ships a `disk-cleanup` plugin. It tracks temporary files your Bots create during a session and removes them automatically. Footprint is the other half:
@@ -69,10 +76,24 @@ Then switch on its page in Hermes Desktop: **Capabilities → Plugins → Footpr
 
 The plugin is enabled per profile. The page finds whichever local profile has it enabled.
 
+## How it talks to Hermes
+
+The page inside Hermes Desktop asks the plugin's own backend, `dashboard/plugin_api.py`, which Hermes mounts at `/api/plugins/hermes-footprint/` once the plugin is in `plugins.enabled`. If that backend isn't available, the page falls back to running `hermes footprint --json` through Desktop. Both use the same read-only scanner. You never need to write a `plugin_api.py` yourself; it ships with the plugin.
+
+## Troubleshooting
+
+- **The page uses the slower CLI path (a console line says "backend REST unavailable").** Hermes mounts a plugin's backend only when the plugin is enabled in the profile Desktop's gateway runs as (usually `default`). Enable it there as well, or leave it: the page works either way.
+- **The page says "Could not read your footprint".** The Python half isn't enabled in the profile Desktop is using. Run `hermes plugins enable hermes-footprint` (or `hermes -p <bot> plugins enable hermes-footprint` for that Bot), then restart Hermes Desktop.
+- **Footprint isn't in Capabilities → Plugins.** Restart Hermes Desktop, or press **Rescan** on that page. Desktop copies the page from `plugins/hermes-footprint/desktop/` itself; nothing to mount by hand.
+- **`hermes plugins install` says BLOCKED by the security scan.** That was 0.3.0. Install again; 0.3.1 and later pass the scan.
+- **`hermes plugins doctor hermes-footprint`** reports a stale Desktop copy or a missing enable, with the command to fix it.
+- **Still stuck?** `hermes footprint` in a terminal shows whether the scanner itself runs; `~/.hermes/logs/errors.log` names any backend import error. Open an issue with those two.
+
 ## Development
 
 ```bash
-python3 tests/test_footprint.py      # 10 tests on a fake ~/.hermes (no pytest needed)
+python3 tests/test_footprint.py      # 10 scanner tests on a fake ~/.hermes (no pytest needed)
+~/.hermes/hermes-agent/venv/bin/python tests/test_plugin_api.py   # the Desktop backend, via FastAPI's test client
 python3 harness/make-payload.py      # scan this machine into harness/payload.js (git-ignored)
 python3 -m http.server 4735          # then open http://127.0.0.1:4735/harness/index.html
 scripts/make-images.sh               # rebuild docs/*.png and the social preview

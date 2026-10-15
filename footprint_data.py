@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import stat as st
 import subprocess
 import time
@@ -28,6 +29,33 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 DAY = 86400
+WINDOWS = sys.platform.startswith("win")
+MACOS = sys.platform == "darwin"
+
+
+def alloc_bytes(s: os.stat_result) -> int:
+    """What a file really costs on disk: allocated blocks where the OS reports them (Linux, macOS),
+    the apparent size where it does not (Windows)."""
+    blocks = getattr(s, "st_blocks", None)
+    return blocks * 512 if blocks is not None else s.st_size
+
+
+def under(path: str, folder: str) -> bool:
+    """True when ``path`` is ``folder`` or inside it, on any OS (no string-prefix tricks)."""
+    try:
+        return os.path.commonpath([os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))]) \
+            == os.path.normcase(os.path.abspath(folder))
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def real_path(display: str, root: Path) -> Path:
+    """``~/.hermes/a/b`` (the display form, always '/'-joined) -> the real path under ``root``."""
+    if display == "~/.hermes":
+        return Path(root)
+    if display.startswith("~/.hermes/"):
+        return Path(root).joinpath(*display[len("~/.hermes/"):].split("/"))
+    return Path(os.path.expanduser(display))
 KEEP_TOP = 16          # children kept per directory in the payload; the rest fold into one tile
 MIN_SHARE = 0.006      # and anything under this share of its parent folds too
 MAX_DEPTH = 5
@@ -167,7 +195,7 @@ class Walker:
                         if key in self.seen:
                             continue
                         self.seen.add(key)
-                    size = s.st_blocks * 512
+                    size = alloc_bytes(s)
                     self.files += 1
                     if self.progress and not self.files % 2000:
                         self.progress.update(files=self.files, where=path[len(self.root):].lstrip("/").split("/")[0])
@@ -372,10 +400,10 @@ def bot_work(root: Path, home: Path) -> dict:
     hroot = str(root)
     out = []
     for where, f in folders.items():
-        if where in (str(home), "/", hroot) or where.startswith(hroot + "/"):
+        if where in (str(home), "/", hroot) or under(where, hroot):
             continue  # home itself and Hermes' own folder are covered by the other root
         exists = os.path.isdir(where)
-        files_in = [p for p in written if p.startswith(where.rstrip("/") + "/")]
+        files_in = [p for p in written if p != where and under(p, where)]
         out.append({"path": where.replace(str(home), "~", 1), "bots": dict(f["bots"].most_common()), "sessions": f["sessions"],
                     "last": f["last"], "exists": exists, "files_written": len(files_in),
                     "files_still_there": sum(1 for p in files_in if os.path.isfile(p))})
@@ -408,7 +436,7 @@ def du(path: str, dev: int, limit_s: float = 4.0) -> int | None:
                             if (s.st_dev, s.st_ino) in seen:
                                 continue
                             seen.add((s.st_dev, s.st_ino))
-                        total += s.st_blocks * 512
+                        total += alloc_bytes(s)
         except OSError:
             continue
     return total
@@ -452,44 +480,100 @@ def collect(root: Path | None = None, now: float | None = None, report: bool = F
 
 
 # ── removal: reviewed paths to the desktop trash, never a permanent delete ──────────────────────
+def trash_command(real: str) -> list | None:
+    """The desktop's own 'move to trash' for this OS, as an argv list (never a shell string).
+    Linux: gio or trash-cli. macOS: Finder. Windows: the Recycle Bin through .NET. None when no tool."""
+    if WINDOWS:
+        ps = shutil.which("powershell") or shutil.which("pwsh")
+        if not ps:
+            return None
+        kind = "DeleteDirectory" if os.path.isdir(real) else "DeleteFile"
+        quoted = real.replace("'", "''")
+        return [ps, "-NoProfile", "-NonInteractive", "-Command",
+                "Add-Type -AssemblyName Microsoft.VisualBasic; "
+                f"[Microsoft.VisualBasic.FileIO.FileSystem]::{kind}('{quoted}', 'OnlyErrorDialogs', 'SendToRecycleBin')"]
+    if MACOS:
+        if not shutil.which("osascript"):
+            return None
+        quoted = real.replace("\\", "\\\\").replace('"', '\\"')
+        return ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{quoted}"']
+    if shutil.which("gio"):
+        return ["gio", "trash", "--", real]
+    if shutil.which("trash-put"):
+        return ["trash-put", "--", real]
+    return None
+
+
+def send_to_trash(real: str) -> str | None:
+    """Move one path to the trash; None on success, else a short reason."""
+    try:  # the cross-platform library, when the host Python has it
+        import send2trash  # type: ignore
+        send2trash.send2trash(real)
+        return None
+    except ImportError:
+        pass
+    except Exception as e:  # noqa: BLE001 — report, then try the OS tool
+        last = f"send2trash: {e}"
+    else:
+        last = None
+    cmd = trash_command(real)
+    if not cmd:
+        return "no trash tool found (Linux: gio or trash-cli; macOS: osascript; Windows: PowerShell)"
+    run = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if run.returncode == 0:
+        return None
+    return (run.stderr.strip().splitlines() or run.stdout.strip().splitlines() or ["failed"])[-1]
+
+
 def trash(paths: list[str], root: Path | None = None) -> dict:
     """Move each path to the trash, but only if a fresh scan marks it reclaimable."""
     root = Path(root) if root else hermes_root()
     allowed = {r["path"]: r for r in reclaimables(shape(Walker(os.stat(root).st_dev).walk(str(root)), "", 0, time.time()), "~/.hermes")}
-    tool = shutil.which("gio") and ["gio", "trash", "--"] or shutil.which("trash-put") and ["trash-put", "--"]
     results = []
     for p in paths:
         if p not in allowed:
             results.append({"path": p, "ok": False, "why": "not marked reclaimable by a fresh scan"}); continue
-        real = str(root) + p[len("~/.hermes"):]
-        if PROTECTED.search(p) or not real.startswith(str(root) + "/"):
+        real = real_path(p, root)
+        if PROTECTED.search(p) or real == Path(root) or not under(str(real), str(root)):
             results.append({"path": p, "ok": False, "why": "protected"}); continue
-        if not tool:
-            results.append({"path": p, "ok": False, "why": "no trash tool (gio or trash-put) found"}); continue
-        run = subprocess.run(tool + [real], capture_output=True, text=True, timeout=120)
-        results.append({"path": p, "ok": run.returncode == 0, "bytes": allowed[p]["bytes"],
-                        "why": None if run.returncode == 0 else (run.stderr.strip().splitlines() or ["failed"])[-1]})
+        why = send_to_trash(str(real))
+        results.append({"path": p, "ok": why is None, "bytes": allowed[p]["bytes"], "why": why})
     return {"results": results, "freed_bytes": sum(r.get("bytes", 0) for r in results if r["ok"]),
             "free_after": shutil.disk_usage(str(root)).free}
 
 
 def open_folder(path: str, root: Path | None = None) -> dict:
     """Show a folder in the desktop file manager. Only inside ~/.hermes or a Bot work folder; a
-    file opens its folder. Uses the desktop's own opener (gio open / xdg-open), never a shell."""
+    file opens its folder. Uses the desktop's own opener, never a shell."""
     root = Path(root) if root else hermes_root()
-    real = Path(str(root) + path[len("~/.hermes"):]) if path.startswith("~/.hermes") else Path(os.path.expanduser(path))
+    real = real_path(path, root)
     real = real if real.is_dir() else real.parent
     try:
         real = real.resolve(strict=True)
     except OSError:
         return {"ok": False, "why": "not found"}
-    allowed = [root.resolve()]
-    if not str(real).startswith(str(allowed[0])):
+    if not under(str(real), str(root.resolve())):
         folders = {os.path.realpath(os.path.expanduser(f["path"])) for f in bot_work(root, Path.home())["folders"] if f["exists"]}
-        if not any(str(real) == f or str(real).startswith(f + "/") for f in folders):
+        if not any(under(str(real), f) for f in folders):
             return {"ok": False, "why": "only folders inside ~/.hermes or a Bot work folder"}
-    tool = shutil.which("gio") and ["gio", "open"] or shutil.which("xdg-open") and ["xdg-open"]
-    if not tool:
-        return {"ok": False, "why": "no gio or xdg-open"}
-    subprocess.Popen(tool + [str(real)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    cmd = open_command(str(real))
+    if cmd is None:
+        return {"ok": False, "why": "no file-manager opener found"}
+    if WINDOWS:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    else:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     return {"ok": True, "path": str(real)}
+
+
+def open_command(real: str) -> list | None:
+    if WINDOWS:
+        return ["explorer", real]
+    if MACOS:
+        return ["open", real]
+    if shutil.which("gio"):
+        return ["gio", "open", real]
+    if shutil.which("xdg-open"):
+        return ["xdg-open", real]
+    return None

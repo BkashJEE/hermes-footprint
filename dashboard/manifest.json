@@ -1,0 +1,8 @@
+{
+  "name": "hermes-footprint",
+  "label": "Footprint",
+  "description": "Backend for the Footprint page in Hermes Desktop: scan ~/.hermes, read progress, move reviewed items to the Trash.",
+  "version": "0.3.2",
+  "api": "plugin_api.py",
+  "tab": { "hidden": true }
+}

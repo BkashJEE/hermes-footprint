@@ -1,8 +1,9 @@
 // hermes-footprint: desktop half. Plain ESM, loaded uncompiled by Hermes Desktop (no JSX, no build).
 //
 // Surfaces: route /footprint (sidebar row "Footprint" + ⌘K "Open Footprint") and a status-bar chip.
-// Data: host.requestProfile(route, "cli.exec", { argv: ["--profile", p, "footprint", "--json"] })
-//       -> a fresh, read-only `hermes footprint` process. Scans on open and on Rescan, not on a timer.
+// Data: the plugin's own backend first, ctx.rest('/scan') -> dashboard/plugin_api.py (mounted by Hermes
+//       when the plugin is in plugins.enabled); if that is unavailable, the CLI: host.requestProfile(route,
+//       "cli.exec", { argv: ["--profile", p, "footprint", "--json"] }). Scans on open and on Rescan.
 // Removal: only after the user reviews the marked list; runs `footprint trash PATH... --json`, which
 //       re-scans, refuses anything the scan did not mark, and moves to the desktop trash (never rm).
 // Look: theme variables only (--ui-*), so it follows Nous dark and every other skin.
@@ -79,6 +80,40 @@ async function pollProgress() {
 }
 function stopScan() { store.stopping = true; notify(); runFootprint(['stop']).catch(() => null) }
 
+// ── backend: REST (dashboard/plugin_api.py) first, the CLI as fallback ──────
+let pluginCtx = null           // set in register(); ctx.rest is this plugin's own REST namespace
+let backend = null             // 'rest' | 'cli', once one has answered
+let restFailure = null
+const REST_TIMEOUT_MS = 180000
+function restAvailable() { return !!(pluginCtx && typeof pluginCtx.rest === 'function') }
+async function viaRest(args) {
+  const rest = (path, opts) => pluginCtx.rest(path, { timeoutMs: REST_TIMEOUT_MS, ...(opts || {}) })
+  const [cmd, ...tail] = args
+  if (!cmd) return rest('/scan')
+  if (cmd === 'progress') return rest('/progress', { timeoutMs: 10000 })
+  if (cmd === 'stop') return rest('/stop', { method: 'POST', body: {} })
+  if (cmd === 'trash') return rest('/trash', { method: 'POST', body: { paths: tail } })
+  if (cmd === 'open') return rest('/open', { method: 'POST', body: { path: tail[0] } })
+  throw new Error(`no REST route for ${cmd}`)
+}
+
+async function runFootprint(args) {
+  if (backend !== 'cli' && restAvailable()) {
+    try {
+      const r = await viaRest(args)
+      backend = 'rest'
+      return r
+    } catch (e) {
+      restFailure = String(e && e.message || e)
+      if (backend === 'rest') throw e   // the backend answered before, so this is a real failure
+      console.error(`[hermes-footprint] backend REST unavailable (${restFailure}); trying the CLI`)
+    }
+  }
+  const r = await viaCli(args)
+  backend = 'cli'
+  return r
+}
+
 async function runOn(route, args) {
   const res = await host.requestProfile(route, 'cli.exec',
     { argv: ['--profile', route.targetProfile, 'footprint', ...args, '--json'], timeout: CLI_TIMEOUT_MS / 1000 }, CLI_TIMEOUT_MS + 5000)
@@ -89,7 +124,7 @@ async function runOn(route, args) {
   return payload
 }
 
-async function runFootprint(args) {
+async function viaCli(args) {
   const tried = []
   for (const route of await localRoutes()) {
     const payload = await runOn(route, args)
@@ -97,7 +132,7 @@ async function runFootprint(args) {
     tried.push(route.profile)
   }
   throw new Error(`the hermes-footprint plugin is not enabled in any local profile (tried ${tried.join(', ')}). ` +
-    'Run: hermes plugins enable hermes-footprint')
+    'Run: hermes plugins enable hermes-footprint, then restart Hermes Desktop.' + (restFailure ? ` (backend: ${restFailure})` : ''))
 }
 
 // One shared store so the page and the status chip never double-scan.
@@ -821,7 +856,8 @@ function FootprintPage() {
   ] })
   if (!d) {
     return jsxs('div', { style: { padding: '16px 22px', height: '100%', overflow: 'auto' }, children: [head,
-      s.error ? jsx('div', { style: { color: C.red, fontSize: 12.5 }, children: `Could not read your footprint: ${s.error}. Is the hermes-footprint Python plugin enabled (plugins.enabled in config.yaml)?` }) : null] })
+      s.error ? jsx('div', { style: { color: C.red, fontSize: 12.5 }, children: `Could not read your footprint: ${s.error}` }) : null,
+      s.error ? jsx('div', { style: { color: C.t3, fontSize: 12, marginTop: 8, fontFamily: MONO }, children: 'Fix: hermes plugins enable hermes-footprint   (then restart Hermes Desktop; use -p <profile> for the Bot Desktop is using)' }) : null] })
   }
   const open = d.reclaimable.filter((r) => !kept.has(r.path))
   const trail = findPath(root, zoom)
@@ -883,6 +919,7 @@ export default {
   id: ID,
   name: 'Footprint',
   register(ctx) {
+    pluginCtx = ctx
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: ROUTE }, render: () => jsx(FootprintPage, {}) })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, order: 87, data: { path: ROUTE, label: 'Footprint', codicon: 'database' } })
     ctx.register({ id: 'open', area: PALETTE_AREA, data: { id: `${ID}.open`, label: 'Open Footprint', keywords: ['footprint', 'disk', 'storage', 'space', 'cleanup', 'treemap'], run: () => host.navigate(ROUTE) } })

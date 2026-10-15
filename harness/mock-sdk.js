@@ -2,6 +2,16 @@
 // "trash" is answered with a canned result here; the harness never touches the disk.
 import payload from './payload.js'
 export const ROUTES_AREA = 'routes', SIDEBAR_NAV_AREA = 'sidebar.nav', PALETTE_AREA = 'palette', STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' }
+export { payload }
+export function trashResult(paths) {
+  const results = paths.map((p) => ({ path: p, ok: true, bytes: (payload.reclaimable.find((r) => r.path === p) || {}).bytes || 0, why: null }))
+  const freed = results.reduce((s, r) => s + r.bytes, 0)
+  return { results, freed_bytes: freed, free_after: payload.disk.free + freed }
+}
+export function progressObj() {
+  const t = (Date.now() - (window.__scanStart || Date.now())) / 1000
+  return { running: true, phase: t < 3 ? 'walk' : 'sizes', files: Math.round(t * 160000), where: t < 1.5 ? 'hermes-agent' : 'installs', expected_files: 494823, step: 4, steps: 13 }
+}
 export const host = {
   state: { focusedSessionOwner: { get: () => null } },
   navigate: (p) => console.log('navigate', p),

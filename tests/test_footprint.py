@@ -86,7 +86,9 @@ class FootprintTest(unittest.TestCase):
     def test_trash_refuses_unmarked_and_protected(self):
         calls = []
         with mock.patch.object(fd.subprocess, "run", side_effect=lambda cmd, **k: calls.append(cmd) or mock.Mock(returncode=0, stdout="", stderr="")), \
-             mock.patch.object(fd.shutil, "which", return_value="/usr/bin/gio"):
+             mock.patch.object(fd.shutil, "which", return_value="/usr/bin/gio"), \
+             mock.patch.dict(sys.modules, {"send2trash": None}), \
+             mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False):
             res = fd.trash(["~/.hermes/state.db", "~/.hermes/cache", "~/.hermes/cache/uv", "/etc"], self.root)
         ok = {r["path"]: r["ok"] for r in res["results"]}
         self.assertEqual(ok, {"~/.hermes/state.db": False, "~/.hermes/cache": False, "~/.hermes/cache/uv": True, "/etc": False})
@@ -143,6 +145,39 @@ class FootprintTest(unittest.TestCase):
         with mock.patch.object(fd.Progress, "__init__", keep_flag), \
              mock.patch.object(fd, "bot_work", return_value={"folders": [], "files": {}}):
             self.assertEqual(fd.collect(self.root, report=True), {"stopped": True})
+
+    def test_alloc_bytes_without_st_blocks(self):
+        class WinStat:  # Windows stat results have no st_blocks
+            st_size = 1234
+        self.assertEqual(fd.alloc_bytes(WinStat()), 1234)
+        real = os.stat(self.root / "state.db")
+        self.assertEqual(fd.alloc_bytes(real), real.st_blocks * 512)
+
+    def test_trash_command_per_os(self):
+        with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False), \
+             mock.patch.object(fd.shutil, "which", return_value="C:\\\\ps\\\\powershell.exe"), \
+             mock.patch.object(fd.os.path, "isdir", return_value=True):
+            cmd = fd.trash_command("C:\\Users\\x\\.hermes\\cache\\it's")
+            self.assertEqual(cmd[1:4], ["-NoProfile", "-NonInteractive", "-Command"])
+            self.assertIn("SendToRecycleBin", cmd[-1]); self.assertIn("DeleteDirectory", cmd[-1]); self.assertIn("it''s", cmd[-1])
+        with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True), \
+             mock.patch.object(fd.shutil, "which", return_value="/usr/bin/osascript"):
+            cmd = fd.trash_command('/Users/x/.hermes/cache/a"b')
+            self.assertEqual(cmd[:2], ["osascript", "-e"]); self.assertIn('POSIX file "/Users/x/.hermes/cache/a\\"b"', cmd[2])
+        with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False), \
+             mock.patch.object(fd.shutil, "which", side_effect=lambda n: "/usr/bin/trash-put" if n == "trash-put" else None):
+            self.assertEqual(fd.trash_command("/h/.hermes/cache/uv"), ["trash-put", "--", "/h/.hermes/cache/uv"])
+        with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False), mock.patch.object(fd.shutil, "which", return_value=None):
+            self.assertIsNone(fd.trash_command("/h/.hermes/cache/uv"))
+
+    def test_open_command_per_os_and_under(self):
+        with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False):
+            self.assertEqual(fd.open_command("C:\\x")[0], "explorer")
+        with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True):
+            self.assertEqual(fd.open_command("/x")[0], "open")
+        self.assertTrue(fd.under(str(self.root / "cache" / "uv"), str(self.root)))
+        self.assertFalse(fd.under("/etc", str(self.root)))
+        self.assertFalse(fd.under(str(self.root) + "2", str(self.root)))  # a sibling that merely shares the prefix
 
     def test_payload_has_no_private_fields(self):
         import json

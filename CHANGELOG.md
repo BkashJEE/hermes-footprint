@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2 — 2026-10-15
+- The Desktop page now talks to the plugin's own backend, `dashboard/plugin_api.py`, through `ctx.rest` (the documented way), and falls back to the `hermes footprint` CLI only when that backend isn't mounted. No `plugin_api.py` has to be written by hand: it ships with the plugin.
+- Clearer failure text on the page, with the exact enable command.
+- `tests/test_plugin_api.py` covers the backend with FastAPI's test client.
+- Dropped the `provides_commands` manifest field, which current Hermes logged as unknown.
+- Windows and macOS: sizes no longer need `st_blocks` (Windows has none), Trash goes through `send2trash`, the Finder or the Recycle Bin, Open uses the OS opener, and path checks are real-path comparisons. Thanks to the reader who hit the Windows crash first.
+
 ## 0.3.1 — 2026-10-15
 - `hermes plugins install` works: the protected-names pattern is now built from a list. Written by hand, its `.env|` looked like an environment dump to Hermes's install scan, which held the install for confirmation. Nothing is protected differently.
 

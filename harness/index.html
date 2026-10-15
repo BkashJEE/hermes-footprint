@@ -15,9 +15,24 @@ body{margin:0;background:#0d1117;color:#e6edf3;font-family:system-ui,sans-serif}
 import { createRoot } from 'react-dom/client'
 import { jsx } from 'react/jsx-runtime'
 import plugin from '../desktop/plugin.js'
+import { payload, trashResult, progressObj } from './mock-sdk.js'
 const reg = []
+const q = new URLSearchParams(location.search)
+const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+// ctx.rest mirrors dashboard/plugin_api.py. ?via=cli makes it fail like a profile without the plugin,
+// so the page's CLI fallback (host.requestProfile) is exercised instead.
 const ctx = { register: (c) => { reg.push(c); return () => {} }, setInterval: (f, ms) => { const t = setInterval(f, ms); return () => clearInterval(t) },
-  addEventListener: (t, e, f) => { t.addEventListener(e, f); return () => t.removeEventListener(e, f) } }
+  addEventListener: (t, e, f) => { t.addEventListener(e, f); return () => t.removeEventListener(e, f) },
+  rest: async (path, opts = {}) => {
+    window.__rest = (window.__rest || []).concat([path])
+    if (q.get('via') === 'cli') throw new Error('404: {"detail":"plugin \'hermes-footprint\' is not enabled in this profile"}')
+    if (path === '/scan') { if (q.get('slow')) { window.__scanStart = Date.now(); await wait(6000) } return payload }
+    if (path === '/progress') return progressObj()
+    if (path === '/stop') return { ok: true }
+    if (path === '/trash') return trashResult(opts.body.paths)
+    if (path === '/open') return { ok: true, path: opts.body.path }
+    throw new Error('404: no route ' + path)
+  } }
 plugin.register(ctx)
 window.__registered = reg.map((c) => ({ id: c.id, area: c.area, data: c.data && { path: c.data.path, label: c.data.label } }))
 createRoot(document.getElementById('root')).render(reg.find((c) => c.area === 'routes').render())
@@ -26,7 +41,7 @@ createRoot(document.getElementById('chip')).render(reg.find((c) => c.area === 's
 const view = new URLSearchParams(location.search).get('view')
 const click = (re) => [...document.querySelectorAll('button')].find((b) => re.test(b.textContent))?.click()
 const key = (k) => window.dispatchEvent(new KeyboardEvent('keydown', { key: k }))
-const steps = { cards: [() => click(/^Can go/)], bots: [() => click(/^Made by your Bots/)], deck: [() => click(/^Review one by one/)],
+const steps = { cards: [() => click(/^Can go/)], marked: [() => click(/^Can go/), () => [...document.querySelectorAll('button')].filter((b) => b.textContent === 'Trash')[1]?.click()], bots: [() => click(/^Made by your Bots/)], deck: [() => click(/^Review one by one/)],
   'deck-end': [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t')],
   confirm: [() => click(/^Review one by one/), () => key('k'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => key('t'), () => click(/^Next: confirm/)] }
 // Wait until the page has its data (the tabs exist), then click through.
