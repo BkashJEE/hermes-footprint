@@ -91,6 +91,7 @@ class FootprintTest(unittest.TestCase):
              mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False):
             res = fd.trash(["~/.hermes/state.db", "~/.hermes/cache", "~/.hermes/cache/uv", "/etc"], self.root)
         ok = {r["path"]: r["ok"] for r in res["results"]}
+        self.assertIn("re-checked", [r["why"] for r in res["results"] if r["path"] == "~/.hermes/cache"][0])
         self.assertEqual(ok, {"~/.hermes/state.db": False, "~/.hermes/cache": False, "~/.hermes/cache/uv": True, "/etc": False})
         trash_calls = [c for c in calls if c[:2] == ["gio", "trash"]]
         self.assertEqual(trash_calls, [["gio", "trash", "--", str(self.root / "cache/uv")]])
@@ -145,6 +146,17 @@ class FootprintTest(unittest.TestCase):
         with mock.patch.object(fd.Progress, "__init__", keep_flag), \
              mock.patch.object(fd, "bot_work", return_value={"folders": [], "files": {}}):
             self.assertEqual(fd.collect(self.root, report=True), {"stopped": True})
+
+    def test_recheck_matches_the_scan(self):
+        scanned = {r["path"] for r in self.scan()["reclaimable"]}
+        for p in sorted(scanned):
+            self.assertIsNotNone(fd.recheck(p, self.root), p)
+        self.assertIsNone(fd.recheck("~/.hermes/backups/b0", self.root))      # newest backup: kept
+        self.assertIsNone(fd.recheck("~/.hermes/tools/node_modules", self.root))
+        self.assertIsNone(fd.recheck("~/.hermes/state.db", self.root))
+        self.assertIsNone(fd.recheck("~/.hermes/../etc", self.root))
+        self.assertIsNone(fd.recheck("~/.hermes/cache/missing", self.root))
+        self.assertEqual(fd.recheck("~/.hermes/cache/uv", self.root)["bytes"], 300_000 if os.name == "nt" else fd.alloc_bytes(os.stat(self.root / "cache/uv/wheel.whl")))
 
     def test_alloc_bytes_without_st_blocks(self):
         class WinStat:  # Windows stat results have no st_blocks

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3 — 2026-10-16
+- Move to Trash no longer re-scans all of `~/.hermes` first. Each marked path is re-checked on its own (that folder plus its parent's entries, same rules), so the step takes seconds, not minutes on a slow disk or on Windows.
+- The Review dialog shows what it is doing: "Checking 2 of 5 · cache/uv", then "Moving to Trash 3 of 5". Reported by a reader whose review/delete step "kept cooking".
+
 ## 0.3.2 — 2026-10-15
 - The Desktop page now talks to the plugin's own backend, `dashboard/plugin_api.py`, through `ctx.rest` (the documented way), and falls back to the `hermes footprint` CLI only when that backend isn't mounted. No `plugin_api.py` has to be written by hand: it ships with the plugin.
 - Clearer failure text on the page, with the exact enable command.

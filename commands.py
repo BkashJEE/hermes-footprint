@@ -80,7 +80,7 @@ def handle_cli(args) -> None:
     try:
         action = getattr(args, "action", "scan")
         if action == "trash":
-            payload = data.trash(list(getattr(args, "paths", []) or []))
+            payload = data.trash(list(getattr(args, "paths", []) or []), report=True)
         elif action == "progress":
             payload = data.read_progress()
         elif action == "stop":

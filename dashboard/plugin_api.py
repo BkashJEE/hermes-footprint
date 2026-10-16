@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 router = APIRouter()
 
 
@@ -61,7 +61,7 @@ async def trash(body: dict):
     paths = body.get("paths") if isinstance(body, dict) else None
     if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
         raise HTTPException(status_code=400, detail="body must be {\"paths\": [\"~/.hermes/...\", ...]}")
-    return await asyncio.to_thread(_data().trash, paths)
+    return await asyncio.to_thread(_data().trash, paths, None, True)
 
 
 @router.post("/open")

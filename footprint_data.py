@@ -525,19 +525,69 @@ def send_to_trash(real: str) -> str | None:
     return (run.stderr.strip().splitlines() or run.stdout.strip().splitlines() or ["failed"])[-1]
 
 
-def trash(paths: list[str], root: Path | None = None) -> dict:
-    """Move each path to the trash, but only if a fresh scan marks it reclaimable."""
+def recheck(display: str, root: Path, now: float | None = None) -> dict | None:
+    """Is this exact path still reclaimable right now? Walks only that folder and looks at its
+    parent's entries (the same rules as the full scan), so it takes well under a second instead of
+    re-scanning all of ~/.hermes. Returns {bytes, reason} or None."""
+    now = time.time() if now is None else now
+    if not display.startswith("~/.hermes/"):
+        return None
+    rel = display[len("~/.hermes/"):]
+    if PROTECTED.search(rel):
+        return None
+    real = real_path(display, root)
+    if real == Path(root) or not under(str(real), str(root)) or not real.exists():
+        return None
+    dev = os.stat(root).st_dev
+    if real.is_dir():
+        node = Walker(dev).walk(str(real))
+    else:
+        st_ = real.stat()
+        node = {"name": real.name, "bytes": alloc_bytes(st_), "files": 1, "mtime": st_.st_mtime, "children": [], "_abs": str(real)}
+    siblings, files = [], set()
+    try:
+        with os.scandir(real.parent) as it:
+            for e in it:
+                if e.name == node["name"]:
+                    siblings.append(node)   # the node itself, so "newest two backups" can recognise it
+                    continue
+                try:
+                    st_ = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    siblings.append({"name": e.name, "mtime": st_.st_mtime, "bytes": 0})
+                else:
+                    files.add(e.name)
+    except OSError:
+        return None
+    parent_rel = rel.rsplit("/", 1)[0] if "/" in rel else ""
+    why = reclaim_reason(rel, node, siblings, parent_rel, now, files)
+    return {"bytes": node["bytes"], "reason": why} if why else None
+
+
+def trash(paths: list[str], root: Path | None = None, report: bool = False) -> dict:
+    """Move each path to the trash, but only if it is reclaimable right now (re-checked per path)."""
     root = Path(root) if root else hermes_root()
-    allowed = {r["path"]: r for r in reclaimables(shape(Walker(os.stat(root).st_dev).walk(str(root)), "", 0, time.time()), "~/.hermes")}
+    prog = Progress(root) if report else None
     results = []
-    for p in paths:
-        if p not in allowed:
-            results.append({"path": p, "ok": False, "why": "not marked reclaimable by a fresh scan"}); continue
-        real = real_path(p, root)
-        if PROTECTED.search(p) or real == Path(root) or not under(str(real), str(root)):
-            results.append({"path": p, "ok": False, "why": "protected"}); continue
-        why = send_to_trash(str(real))
-        results.append({"path": p, "ok": why is None, "bytes": allowed[p]["bytes"], "why": why})
+    try:
+        for i, p in enumerate(paths, 1):
+            name = p.rsplit("/", 1)[-1]
+            if prog:
+                prog.update(force=True, phase="check", step=i, steps=len(paths), where=name)
+            ok = recheck(p, root)
+            if ok is None:
+                results.append({"path": p, "ok": False, "why": "not reclaimable right now (re-checked before moving)"}); continue
+            if prog:
+                prog.update(force=True, phase="trash", step=i, steps=len(paths), where=name)
+            why = send_to_trash(str(real_path(p, root)))
+            results.append({"path": p, "ok": why is None, "bytes": ok["bytes"], "why": why})
+    except Stopped:
+        pass
+    finally:
+        if prog:
+            prog.finish(0, stopped=True)   # never record a trash run as a scan
     return {"results": results, "freed_bytes": sum(r.get("bytes", 0) for r in results if r["ok"]),
             "free_after": shutil.disk_usage(str(root)).free}
 

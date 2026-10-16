@@ -694,15 +694,26 @@ function WorthALook({ items, marked, onToggle, onReview, onDeck, keptCount, onSh
   ] })
 }
 
+const TRASH_PHASE = { check: 'Checking', trash: 'Moving to Trash' }
 function Review({ items, onCancel, onDone }) {
   const [busy, setBusy] = useState(false), [result, setResult] = useState(null), [err, setErr] = useState(null)
+  const [stage, setStage] = useState(null)
   const total = items.reduce((s, r) => s + r.bytes, 0)
   const go = () => {
-    setBusy(true); setErr(null)
+    setBusy(true); setErr(null); setStage({ phase: 'check', step: 0, steps: items.length })
+    let live = true
+    const poll = async () => { // the backend re-checks each path, then moves it; show which one it is on
+      while (live) {
+        await new Promise((r) => setTimeout(r, 900))
+        if (!live) break
+        try { const p = await runFootprint(['progress']); if (live && p && p.running && TRASH_PHASE[p.phase]) setStage(p) } catch { /* best effort */ }
+      }
+    }
+    poll()
     runFootprint(['trash', ...items.map((r) => r.path)])
       .then((res) => { setResult(res); rescan() })
       .catch((e) => setErr(String(e && e.message || e)))
-      .finally(() => setBusy(false))
+      .finally(() => { live = false; setBusy(false); setStage(null) })
   }
   return jsx('div', { style: { position: 'absolute', inset: 0, background: 'rgba(1,4,9,.86)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5 },
     children: jsxs('div', { style: { width: 'min(560px, 92%)', background: C.panel, border: `1px solid ${C.stroke}`, borderRadius: 12, padding: 18, boxShadow: '0 20px 60px rgba(0,0,0,.5)' }, children: [
@@ -721,13 +732,15 @@ function Review({ items, onCancel, onDone }) {
           jsx('span', { style: { fontFamily: MONO, color: C.t2, flex: 'none' }, children: fmt(r.bytes) }),
         ] })) }),
       err ? jsx('div', { style: { color: C.red, fontSize: 12, marginBottom: 8 }, children: err }) : null,
+      busy && stage ? jsx('div', { style: { color: C.t2, fontSize: 12, marginBottom: 8, fontFamily: MONO },
+        children: `${TRASH_PHASE[stage.phase] || 'Working'} ${stage.step || 0} of ${stage.steps || items.length}${stage.where ? ` · ${stage.where}` : ''}…` }) : null,
       jsxs('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' }, children: result
         ? [jsx('button', { type: 'button', onClick: onDone, style: btn({ color: C.t1 }), children: 'Close' }, 'c')]
         : [
           jsx('button', { type: 'button', onClick: () => { handToBot(items); onCancel() }, disabled: busy, style: btn({ marginRight: 'auto', color: C.t1 }),
             title: 'Draft a prompt in chat for a Bot to do it, checking each path first (not sent)', children: '✦ Hand to a Bot' }, 'bot'),
           jsx('button', { type: 'button', onClick: onCancel, disabled: busy, style: btn(), children: 'Cancel' }, 'x'),
-          jsx('button', { type: 'button', onClick: go, disabled: busy, style: btn({ background: C.red, color: '#fff', border: 0 }), children: busy ? 'Moving…' : `Move to Trash · ${fmt(total)}` }, 'go'),
+          jsx('button', { type: 'button', onClick: go, disabled: busy, style: btn({ background: C.red, color: '#fff', border: 0 }), children: busy ? 'Working…' : `Move to Trash · ${fmt(total)}` }, 'go'),
         ] }),
     ] }) })
 }
