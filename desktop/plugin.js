@@ -587,7 +587,11 @@ function CardsView({ items, marked, onToggle, onReview, onTrashMarked, keptCount
   return jsx('div', { style: { flex: 1, minHeight: 0, overflow: 'auto' }, children: items.length
     ? jsxs('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))', gap: 12 }, children: [summary,
       ...items.map((r, i) => jsx(GoCard, { key: r.path, r, share: (100 * r.bytes) / total, marked: marked.has(r.path), onToggle, onDetails: () => onReview(i) }))] })
-    : jsx('div', { style: { color: C.green, fontSize: 13 }, children: 'Nothing can go right now. Hermes is tidy.' }) })
+    : keptCount
+      ? jsxs('div', { style: { color: C.t2, fontSize: 13, display: 'flex', gap: 10, alignItems: 'center' }, children: [
+        `Nothing new can go. You chose to keep ${keptCount} item${keptCount === 1 ? '' : 's'}.`,
+        jsx('button', { type: 'button', onClick: onShowKept, style: btn({ color: C.t1, padding: '5px 12px' }), children: `Show ${keptCount} kept` })] })
+      : jsx('div', { style: { color: C.green, fontSize: 13 }, children: 'Nothing can go right now. Hermes is tidy.' }) })
 }
 
 function GitBlock({ g }) {
@@ -882,7 +886,7 @@ function FootprintPage() {
     head,
     jsxs('div', { style: { display: 'flex', gap: 6, marginBottom: 10, alignItems: 'center' }, children: [
       tabBtn('hermes', `Hermes itself · ${fmt(d.hermes.bytes)}`),
-      tabBtn('cards', `Can go · ${open.length}`),
+      tabBtn('cards', `Can go · ${open.length}${d.reclaimable.length > open.length ? ` · ${d.reclaimable.length - open.length} kept` : ''}`),
       tabBtn('bots', `Made by your Bots · ${d.bots.files.written} files`),
       tab === 'hermes' ? jsx('div', { style: { marginLeft: 12, fontSize: 12, color: C.t3, display: 'flex', gap: 4, flexWrap: 'wrap' }, children: trail.map((n, i) => jsxs('span', { key: n.fullPath, children: [
         i ? ' / ' : '',

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.3.4 — 2026-10-17
+- Can go no longer looks empty when you've kept everything. If every item was kept, the tab used to say "Can go · 0" and "Hermes is tidy", with no way to bring the kept items back from that screen. The tab now reads "Can go · 0 · 6 kept", and the empty screen says "Nothing new can go. You chose to keep 6 items." with a Show 6 kept button.
+
 ## 0.3.3 — 2026-10-16
 - Move to Trash no longer re-scans all of `~/.hermes` first. Each marked path is re-checked on its own (that folder plus its parent's entries, same rules), so the step takes seconds, not minutes on a slow disk or on Windows.
 - The Review dialog shows what it is doing: "Checking 2 of 5 · cache/uv", then "Moving to Trash 3 of 5". Reported by a reader whose review/delete step "kept cooking".
