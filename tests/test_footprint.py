@@ -1,6 +1,7 @@
 """Run: python3 tests/test_footprint.py  (plain unittest; builds a fake ~/.hermes in a temp dir)."""
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -73,6 +74,34 @@ class FootprintTest(unittest.TestCase):
     def test_protected_never_offered(self):
         for r in self.scan()["reclaimable"]:
             self.assertIsNone(fd.PROTECTED.search(r["path"].replace("~/.hermes/", "")), r["path"])
+
+    def test_reading_a_checkout_does_not_write_it(self):
+        """`git status` refreshes `.git/index` unless `--no-optional-locks` is passed, so a scan
+        could write to a checkout. This is a plain checkout: a linked worktree keeps its index in
+        the parent repo (`<repo>/.git/worktrees/<n>/index`), and git decides per entry whether a
+        refreshed stat cache is worth writing, which makes that path harder to observe."""
+        repo = Path(self.tmp.name) / "checkout"
+        repo.mkdir()
+        ident = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        env = {**os.environ, **ident}
+
+        def git(*a):
+            return subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True, env=env)
+
+        git("init", "-q")
+        (repo / "a.txt").write_text("x\n")
+        git("add", ".")
+        git("commit", "-qm", "base")
+        index = repo / ".git" / "index"
+        old = time.time() - 3600
+        os.utime(index, (old, old))             # stamp the index hours ago: a rewrite cannot hide
+        os.utime(repo / "a.txt", None)          # and make the cached stat stale
+        before = index.stat().st_mtime
+        fd.git_info(str(repo))
+        fd.git_dirty(str(repo))
+        self.assertEqual(before, index.stat().st_mtime,
+                         "the scan rewrote .git/index; pass --no-optional-locks to git")
 
     def test_hardlinks_counted_once_and_kinds(self):
         d = self.scan()
