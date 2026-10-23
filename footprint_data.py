@@ -483,32 +483,56 @@ def collect(root: Path | None = None, now: float | None = None, report: bool = F
 
 
 # ── removal: reviewed paths to the desktop trash, never a permanent delete ──────────────────────
-def trash_command(real: str) -> list | None:
-    """The desktop's own 'move to trash' for this OS, as an argv list (never a shell string).
-    Linux: gio or trash-cli. macOS: Finder. Windows: the Recycle Bin through .NET. None when no tool."""
+OSASCRIPT_TIMEOUT = 20  # an unapproved Automation prompt blocks Finder; fail fast, don't hang the request
+
+
+def trash_commands(real: str) -> list[list[str]]:
+    """Every 'move to trash' for this OS, best first, as argv lists (never a shell string).
+
+    macOS tries ``/usr/bin/trash`` first: it moves the path to ~/.Trash without Apple Events, so it
+    works from a headless gateway where Finder automation was never approved. Finder through
+    ``osascript`` stays as the fallback for a Mac that has no ``trash`` tool.
+    """
     if WINDOWS:
         ps = shutil.which("powershell") or shutil.which("pwsh")
         if not ps:
-            return None
+            return []
         kind = "DeleteDirectory" if os.path.isdir(real) else "DeleteFile"
         quoted = real.replace("'", "''")
-        return [ps, "-NoProfile", "-NonInteractive", "-Command",
-                "Add-Type -AssemblyName Microsoft.VisualBasic; "
-                f"[Microsoft.VisualBasic.FileIO.FileSystem]::{kind}('{quoted}', 'OnlyErrorDialogs', 'SendToRecycleBin')"]
+        return [[ps, "-NoProfile", "-NonInteractive", "-Command",
+                 "Add-Type -AssemblyName Microsoft.VisualBasic; "
+                 f"[Microsoft.VisualBasic.FileIO.FileSystem]::{kind}('{quoted}', 'OnlyErrorDialogs', 'SendToRecycleBin')"]]
     if MACOS:
-        if not shutil.which("osascript"):
-            return None
-        quoted = real.replace("\\", "\\\\").replace('"', '\\"')
-        return ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{quoted}"']
+        cmds = []
+        # real is always an absolute path here, and `trash` has no `--` separator: "--" would be
+        # read as a file name and make it exit non-zero on a move that actually succeeded.
+        if shutil.which("trash"):
+            cmds.append(["trash", real])
+        if shutil.which("osascript"):
+            quoted = real.replace("\\", "\\\\").replace('"', '\\"')
+            cmds.append(["osascript", "-e", f'tell application "Finder" to delete POSIX file "{quoted}"'])
+        return cmds
+    cmds = []
     if shutil.which("gio"):
-        return ["gio", "trash", "--", real]
+        cmds.append(["gio", "trash", "--", real])
     if shutil.which("trash-put"):
-        return ["trash-put", "--", real]
-    return None
+        cmds.append(["trash-put", "--", real])
+    return cmds
+
+
+def trash_command(real: str) -> list | None:
+    """The first 'move to trash' command for this OS, or None when the desktop has no tool."""
+    cmds = trash_commands(real)
+    return cmds[0] if cmds else None
 
 
 def send_to_trash(real: str) -> str | None:
-    """Move one path to the trash; None on success, else a short reason."""
+    """Move one path to the trash; None on success, else a short reason.
+
+    A tool that fails or hangs returns a reason instead of raising: the Desktop page shows it per
+    path, so a denied Automation prompt reads as a timeout instead of a request that never answers.
+    """
+    last = None
     try:  # the cross-platform library, when the host Python has it
         import send2trash  # type: ignore
         send2trash.send2trash(real)
@@ -517,15 +541,25 @@ def send_to_trash(real: str) -> str | None:
         pass
     except Exception as e:  # noqa: BLE001 — report, then try the OS tool
         last = f"send2trash: {e}"
-    else:
-        last = None
-    cmd = trash_command(real)
-    if not cmd:
-        return "no trash tool found (Linux: gio or trash-cli; macOS: osascript; Windows: PowerShell)"
-    run = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if run.returncode == 0:
-        return None
-    return (run.stderr.strip().splitlines() or run.stdout.strip().splitlines() or ["failed"])[-1]
+    cmds = trash_commands(real)
+    if not cmds:
+        return last or "no trash tool found (Linux: gio or trash-cli; macOS: trash or osascript; Windows: PowerShell)"
+    for cmd in cmds:
+        tool = os.path.basename(cmd[0])
+        timeout = OSASCRIPT_TIMEOUT if tool == "osascript" else 120
+        try:
+            run = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            last = (f"{tool}: no answer after {timeout}s (macOS asks once for Automation permission; "
+                    "allow Python to control Finder in System Settings → Privacy & Security → Automation)")
+            continue
+        except OSError as e:
+            last = f"{tool}: {e}"
+            continue
+        if run.returncode == 0:
+            return None
+        last = (f"{tool}: " + (run.stderr.strip().splitlines() or run.stdout.strip().splitlines() or ["failed"])[-1])
+    return last or "no trash command succeeded"
 
 
 def recheck(display: str, root: Path, now: float | None = None) -> dict | None:

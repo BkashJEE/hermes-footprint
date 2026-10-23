@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5 — 2026-10-23
+- macOS: Move to Trash works from a headless gateway again. It moves the path with `/usr/bin/trash`, which needs no Apple Events, and keeps Finder (`osascript`) as the fallback. Before this, the Finder step waited on an Automation permission prompt that a headless or remote Desktop backend cannot answer: the request hung for 120 seconds, then failed with no message on the page.
+- A trash tool that fails or hangs now returns a short reason per path instead of raising into the request, so the Review dialog lists what did not move and why (on macOS it names the Automation permission it needs).
+- The Finder fallback gives up after 20 seconds instead of 120, so an unanswered prompt cannot stall the page.
+
 ## 0.3.4 — 2026-10-17
 - Can go no longer looks empty when you've kept everything. If every item was kept, the tab used to say "Can go · 0" and "Hermes is tidy", with no way to bring the kept items back from that screen. The tab now reads "Can go · 0 · 6 kept", and the empty screen says "Nothing new can go. You chose to keep 6 items." with a Show 6 kept button.
 
