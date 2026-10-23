@@ -226,7 +226,8 @@ def git_info(path: str | None) -> dict | None:
         return None
 
     def run(*args):
-        r = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=30)
+        r = subprocess.run(["git", "--no-optional-locks", "-C", path, *args], capture_output=True,
+                           text=True, timeout=30, env={**os.environ, "GIT_NO_LAZY_FETCH": "1"})
         return r.stdout if r.returncode == 0 else None
     try:
         status = run("status", "--porcelain=v1", "--branch")
@@ -252,7 +253,9 @@ def git_dirty(path: str | None) -> int:
     if not path:
         return 0
     try:
-        run = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True, timeout=20)
+        run = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain"],
+                             capture_output=True, text=True, timeout=20,
+                             env={**os.environ, "GIT_NO_LAZY_FETCH": "1"})
         return len([l for l in run.stdout.splitlines() if l.strip()]) if run.returncode == 0 else 0
     except (OSError, subprocess.SubprocessError):
         return 0
