@@ -83,6 +83,7 @@ The page inside Hermes Desktop asks the plugin's own backend, `dashboard/plugin_
 ## Troubleshooting
 
 - **The page uses the slower CLI path (a console line says "backend REST unavailable").** Hermes mounts a plugin's backend only when the plugin is enabled in the profile Desktop's gateway runs as (usually `default`). Enable it there as well, or leave it: the page works either way.
+- **Move to Trash does nothing, or the page sits on "Working…" on macOS.** Finder needs Automation permission for the Python running the gateway ("Python wants to control Finder"), and a headless or remote backend cannot answer that prompt. Since 0.3.5 the plugin uses `/usr/bin/trash` and asks for nothing; on an older version, approve the prompt in **System Settings → Privacy & Security → Automation**, or move the folder with `hermes footprint trash ~/.hermes/cache/uv` from a terminal.
 - **The page says "Could not read your footprint".** The Python half isn't enabled in the profile Desktop is using. Run `hermes plugins enable hermes-footprint` (or `hermes -p <bot> plugins enable hermes-footprint` for that Bot), then restart Hermes Desktop.
 - **Footprint isn't in Capabilities → Plugins.** Restart Hermes Desktop, or press **Rescan** on that page. Desktop copies the page from `plugins/hermes-footprint/desktop/` itself; nothing to mount by hand.
 - **`hermes plugins install` says BLOCKED by the security scan.** That was 0.3.0. Install again; 0.3.1 and later pass the scan.

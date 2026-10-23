@@ -1,6 +1,7 @@
 """Run: python3 tests/test_footprint.py  (plain unittest; builds a fake ~/.hermes in a temp dir)."""
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -173,7 +174,7 @@ class FootprintTest(unittest.TestCase):
             self.assertEqual(cmd[1:4], ["-NoProfile", "-NonInteractive", "-Command"])
             self.assertIn("SendToRecycleBin", cmd[-1]); self.assertIn("DeleteDirectory", cmd[-1]); self.assertIn("it''s", cmd[-1])
         with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True), \
-             mock.patch.object(fd.shutil, "which", return_value="/usr/bin/osascript"):
+             mock.patch.object(fd.shutil, "which", side_effect=lambda n: "/usr/bin/osascript" if n == "osascript" else None):
             cmd = fd.trash_command('/Users/x/.hermes/cache/a"b')
             self.assertEqual(cmd[:2], ["osascript", "-e"]); self.assertIn('POSIX file "/Users/x/.hermes/cache/a\\"b"', cmd[2])
         with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False), \
@@ -181,6 +182,45 @@ class FootprintTest(unittest.TestCase):
             self.assertEqual(fd.trash_command("/h/.hermes/cache/uv"), ["trash-put", "--", "/h/.hermes/cache/uv"])
         with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False), mock.patch.object(fd.shutil, "which", return_value=None):
             self.assertIsNone(fd.trash_command("/h/.hermes/cache/uv"))
+
+    def test_macos_prefers_trash_tool_over_apple_events(self):
+        found = {"trash": "/usr/bin/trash", "osascript": "/usr/bin/osascript"}
+        with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True), \
+             mock.patch.object(fd.shutil, "which", side_effect=lambda n: found.get(n)):
+            cmds = fd.trash_commands("/Users/x/.hermes/cache/uv")
+            # /usr/bin/trash needs no Automation permission, so it must come first; Finder is the fallback.
+            self.assertEqual(cmds[0], ["trash", "/Users/x/.hermes/cache/uv"])
+            self.assertEqual(cmds[1][:2], ["osascript", "-e"])
+            self.assertEqual(fd.trash_command("/Users/x/.hermes/cache/uv"), cmds[0])
+
+    def test_trash_tool_gets_an_absolute_path_and_no_separator(self):
+        # `trash` has no `--`: it reads that as a file name and exits non-zero even when the move worked.
+        with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True), \
+             mock.patch.object(fd.shutil, "which", side_effect=lambda n: "/usr/bin/trash" if n == "trash" else None):
+            self.assertEqual(fd.trash_command("/Users/x/.hermes/cache/uv"), ["trash", "/Users/x/.hermes/cache/uv"])
+
+    def test_send_to_trash_falls_through_to_the_next_tool(self):
+        calls = []
+        def run(cmd, **k):
+            calls.append(cmd)
+            if cmd[0] == "trash":
+                raise subprocess.TimeoutExpired(cmd, fd.OSASCRIPT_TIMEOUT)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.dict(sys.modules, {"send2trash": None}), \
+             mock.patch.object(fd, "trash_commands", return_value=[["trash", "/x"], ["osascript", "-e", "y"]]), \
+             mock.patch.object(fd.subprocess, "run", side_effect=run):
+            self.assertIsNone(fd.send_to_trash("/x"))
+        self.assertEqual([c[0] for c in calls], ["trash", "osascript"])
+
+    def test_send_to_trash_returns_a_reason_instead_of_raising(self):
+        # A denied Automation prompt used to block for 120s and then raise TimeoutExpired into the page.
+        with mock.patch.dict(sys.modules, {"send2trash": None}), \
+             mock.patch.object(fd, "trash_commands", return_value=[["osascript", "-e", "y"]]), \
+             mock.patch.object(fd.subprocess, "run", side_effect=subprocess.TimeoutExpired(["osascript"], fd.OSASCRIPT_TIMEOUT)):
+            why = fd.send_to_trash("/x")
+        self.assertIn("no answer after", why)
+        self.assertIn("osascript", why)
+        self.assertIn("Automation", why)
 
     def test_open_command_per_os_and_under(self):
         with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False):

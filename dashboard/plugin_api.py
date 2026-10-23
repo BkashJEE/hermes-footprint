@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 router = APIRouter()
 
 
