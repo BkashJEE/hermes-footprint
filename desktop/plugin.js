@@ -608,22 +608,30 @@ function GitBlock({ g }) {
 }
 
 // Ask a Bot to clear the marked list, disktree's "copy a prompt for a coding agent", but straight into
-// Hermes chat as a draft. Paths come from the scan; a name holding a newline is left out.
+// Hermes chat as a draft. Paths come from folder names on disk, which anything can create: a name with
+// shell or markdown syntax ($, `, ;, |, &, quotes, newlines) could turn into a command the Bot runs, so
+// only plain names are listed, and only names without a space get a ready-made command.
 // Each tool's own clean command, pointed at THIS folder (a bare `uv cache clean` would empty the global cache instead).
 const CLEAN_HINT = { uv: (p) => `~/.hermes/bin/uv cache clean --cache-dir ${p}`, pip: (p) => `PIP_CACHE_DIR=${p} pip cache purge`,
   _cacache: (p) => `npm cache clean --force --cache ${p.replace(/\/_cacache$/, '')}` }
-function handToBot(items) {
-  const safe = items.filter((r) => !/[\n\r]/.test(r.path))
+const PLAIN_PATH = /^[A-Za-z0-9_.~/@+ -]+$/
+export function draftForBot(items) {
+  const safe = items.filter((r) => PLAIN_PATH.test(r.path))
+  const left = items.length - safe.length
   const lines = safe.map((r) => {
     const name = r.path.split('/').pop()
     const hint = r.kind === 'worktree' ? 'git worktree: use `git worktree remove` from its main repo, never if it holds work found nowhere else'
-      : CLEAN_HINT[name] ? `the tool's own command, for this folder only: \`${CLEAN_HINT[name](r.path)}\`` : 'move it to the desktop trash'
+      : CLEAN_HINT[name] && !r.path.includes(' ') ? `the tool's own command, for this folder only: \`${CLEAN_HINT[name](r.path)}\`` : 'move it to the desktop trash'
     return `- ${r.path} (${fmt(r.bytes)}): ${r.reason}. How: ${hint}.`
   })
-  const text = `Footprint found ${fmt(safe.reduce((a, r) => a + r.bytes, 0))} I want back on this machine. Free it by removing exactly these, and nothing else:\n\n${lines.join('\n')}\n\n` +
+  return `Footprint found ${fmt(safe.reduce((a, r) => a + r.bytes, 0))} I want back on this machine. Free it by removing exactly these, and nothing else:\n\n${lines.join('\n')}\n\n` +
     'Before each one, check the path still exists and still is what the note says. For a git checkout, check for uncommitted changes, untracked files and commits that exist on no remote; if any, stop and ask me. ' +
     'Prefer a tool\'s own clean command; otherwise move to the trash (gio trash), never rm -rf. Never touch state.db, memories, skills, plugins, config, keys or the Hermes app. ' +
-    'Show me the plan first and wait for my OK. Afterwards report what was removed and how much free space was gained.'
+    'Show me the plan first and wait for my OK. Afterwards report what was removed and how much free space was gained.' +
+    (left ? `\n\n(${left === 1 ? '1 item with an unusual name is' : `${left} items with unusual names are`} left out; use Footprint's own Trash for ${left === 1 ? 'it' : 'them'}.)` : '')
+}
+function handToBot(items) {
+  const text = draftForBot(items)
   host.navigate('/')
   window.setTimeout(() => {
     window.dispatchEvent(new CustomEvent(COMPOSER_INSERT, { detail: { mode: 'block', target: 'main', text } }))

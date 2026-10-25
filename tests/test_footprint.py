@@ -15,6 +15,43 @@ fd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fd)
 
 OLD = time.time() - 90 * 86400
+REAL_SCANDIR = os.scandir
+
+
+class WindowsDirEntry:
+    """A DirEntry as Windows hands it out: stat() leaves st_ino, st_dev and st_nlink at 0
+    (https://docs.python.org/3/library/os.html#os.DirEntry.stat)."""
+
+    def __init__(self, entry):
+        self._e = entry
+        self.name, self.path = entry.name, entry.path
+
+    def stat(self, follow_symlinks=True):
+        s = self._e.stat(follow_symlinks=follow_symlinks)
+        return os.stat_result((s.st_mode, 0, 0, 0, s.st_uid, s.st_gid, s.st_size, s.st_atime, s.st_mtime, s.st_ctime))
+
+    def is_dir(self, follow_symlinks=True):
+        return self._e.is_dir(follow_symlinks=follow_symlinks)
+
+    def is_file(self, follow_symlinks=True):
+        return self._e.is_file(follow_symlinks=follow_symlinks)
+
+
+class windows_scandir:
+    def __init__(self, path):
+        self._it = REAL_SCANDIR(path)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._it.close()
+
+    def __iter__(self):
+        return (WindowsDirEntry(e) for e in self._it)
+
+    def close(self):
+        self._it.close()
 
 
 def make(root: Path, rel: str, size: int = 4096, mtime: float | None = None) -> Path:
@@ -133,7 +170,7 @@ class FootprintTest(unittest.TestCase):
             self.assertFalse(fd.open_folder("/etc", self.root)["ok"])
             self.assertFalse(fd.open_folder("~/.hermes/../../etc", self.root)["ok"])
         self.assertEqual(len(opened), 1)
-        self.assertTrue(opened[0][-1].endswith("/cache/uv"))
+        self.assertTrue(opened[0][-1].replace("\\", "/").endswith("/cache/uv"))
 
     def test_git_details_for_a_worktree(self):
         import subprocess
@@ -192,7 +229,7 @@ class FootprintTest(unittest.TestCase):
             st_size = 1234
         self.assertEqual(fd.alloc_bytes(WinStat()), 1234)
         real = os.stat(self.root / "state.db")
-        self.assertEqual(fd.alloc_bytes(real), real.st_blocks * 512)
+        self.assertEqual(fd.alloc_bytes(real), real.st_blocks * 512 if hasattr(real, "st_blocks") else real.st_size)
 
     def test_trash_command_per_os(self):
         with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False), \
@@ -200,7 +237,8 @@ class FootprintTest(unittest.TestCase):
              mock.patch.object(fd.os.path, "isdir", return_value=True):
             cmd = fd.trash_command("C:\\Users\\x\\.hermes\\cache\\it's")
             self.assertEqual(cmd[1:4], ["-NoProfile", "-NonInteractive", "-Command"])
-            self.assertIn("SendToRecycleBin", cmd[-1]); self.assertIn("DeleteDirectory", cmd[-1]); self.assertIn("it''s", cmd[-1])
+            self.assertIn("SendToRecycleBin", cmd[-1]); self.assertIn("DeleteDirectory", cmd[-1])
+            self.assertIn("$env:FOOTPRINT_TRASH_PATH", cmd[-1])
         with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True), \
              mock.patch.object(fd.shutil, "which", return_value="/usr/bin/osascript"):
             cmd = fd.trash_command('/Users/x/.hermes/cache/a"b')
@@ -211,14 +249,130 @@ class FootprintTest(unittest.TestCase):
         with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", False), mock.patch.object(fd.shutil, "which", return_value=None):
             self.assertIsNone(fd.trash_command("/h/.hermes/cache/uv"))
 
+    def test_windows_trash_path_is_never_part_of_the_script(self):
+        """PowerShell also ends a '...' string at the typographic quotes (U+2018-U+201B), so escaping
+        only ' let a folder name run code. The path must reach PowerShell as data, not as script."""
+        name = "C:\\h\\.hermes\\backups\\a\u2019); ni pwned; (\u2019 it's"
+        seen = []
+        with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False), \
+             mock.patch.object(fd.shutil, "which", return_value="C:\\ps\\powershell.exe"), \
+             mock.patch.dict(sys.modules, {"send2trash": None}), \
+             mock.patch.object(fd.subprocess, "run", side_effect=lambda cmd, **k: seen.append((cmd, k)) or mock.Mock(returncode=0, stdout="", stderr="")):
+            self.assertIsNone(fd.send_to_trash(name))
+        (cmd, kw), = seen
+        self.assertFalse(any("\u2019" in a or "pwned" in a for a in cmd), cmd)
+        self.assertEqual(kw["env"]["FOOTPRINT_TRASH_PATH"], name)
+
+    @unittest.skipUnless(os.name == "nt" and os.environ.get("FOOTPRINT_REAL_TRASH"),
+                         "Windows only; set FOOTPRINT_REAL_TRASH=1 (moves a small test folder to the Recycle Bin)")
+    def test_windows_real_trash_runs_no_code_from_a_name(self):
+        evil = "a\u2019); ni INJECTED.txt; (\u2019"
+        make(self.root, f"backups/{evil}/f.txt", 10, OLD); os.utime(self.root / "backups" / evil, (OLD, OLD))
+        cwd = os.getcwd(); os.chdir(self.tmp.name)
+        try:
+            res = fd.trash([f"~/.hermes/backups/{evil}"], self.root)
+        finally:
+            os.chdir(cwd)
+        self.assertFalse((Path(self.tmp.name) / "INJECTED.txt").exists(), "the folder name ran as code")
+        self.assertTrue(res["results"][0]["ok"], res)
+        self.assertFalse((self.root / "backups" / evil).exists())
+
+    def link(self, link: Path, target: Path) -> None:
+        target.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":   # a junction needs no admin rights, unlike a symlink
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+        else:
+            os.symlink(target, link)
+
+    def test_recheck_refuses_paths_the_scan_never_produces(self):
+        """The re-check must hold for any caller (REST, CLI), not only for paths the page sends:
+        no backslashes, '.', '..' or empty segments, no case games with protected names, and no
+        link or junction anywhere on the way."""
+        make(self.root, ".env", 100, OLD)
+        make(self.root, "skills/x/__pycache__/m.pyc", 100)
+        self.link(self.root / "cache" / "pip", Path(self.tmp.name) / "outside")
+        make(Path(self.tmp.name), "outside/secret.txt", 10)
+        for p in ["~/.hermes/backups/x\\..\\..\\.env", "~/.hermes/backups/b9/../b2", "~/.hermes/backups/./b2",
+                  "~/.hermes/backups//b2", "~/.hermes/SKILLS/x/__pycache__", "~/.hermes/cache/pip"]:
+            self.assertIsNone(fd.recheck(p, self.root), p)
+        self.assertIsNotNone(fd.recheck("~/.hermes/backups/b2", self.root))
+        self.assertIsNotNone(fd.recheck("~/.hermes/cache/uv", self.root))
+
+    def test_source_compiles_without_warnings(self):
+        """An invalid escape such as "C:\\Windows" in a normal string is a warning today and an error later."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            compile(Path(fd.__file__).read_text(encoding="utf-8"), fd.__file__, "exec")
+
+    def test_windows_programs_never_come_from_the_current_folder(self):
+        """Windows looks for a bare program name in the current folder first (CreateProcess and
+        Python's shutil.which), so a planted explorer.exe, powershell.exe or git.exe there would run."""
+        here, on_path = Path(self.tmp.name) / "cwd", Path(self.tmp.name) / "bin"
+        for d in (here, on_path):
+            d.mkdir(); (d / "git.exe").write_bytes(b"")
+        windir = os.path.join("C:\\", "Windows")
+        cwd = os.getcwd(); os.chdir(here)
+        try:
+            with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False), \
+                 mock.patch.dict(os.environ, {"SystemRoot": windir, "PATH": str(on_path)}):
+                self.assertEqual(fd.trash_command(str(self.root / "cache" / "uv"))[0],
+                                 os.path.join(windir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
+                self.assertEqual(fd.open_command("C:\\x")[0], os.path.join(windir, "explorer.exe"))
+                self.assertEqual(fd.find_exe("git"), str(on_path / "git.exe"))
+            with mock.patch.object(fd, "WINDOWS", True), mock.patch.dict(os.environ, {"PATH": os.pathsep.join(["", "."])}):
+                self.assertIsNone(fd.find_exe("git"))   # only the one in the current folder: never used
+        finally:
+            os.chdir(cwd)
+
+    def test_scan_does_not_walk_into_links(self):
+        """A junction (Windows) or symlink to a folder elsewhere is not Hermes' space. The walk and
+        du() must not enter it, and a link back to ~/.hermes must not be walked again."""
+        dev = os.stat(self.root).st_dev
+        before, du_before = self.scan()["hermes"]["bytes"], fd.du(str(self.root), dev)
+        make(Path(self.tmp.name), "elsewhere/big.bin", 500_000)
+        self.link(self.root / "cache" / "linked", Path(self.tmp.name) / "elsewhere")
+        self.link(self.root / "cache" / "loop", self.root)
+        self.assertLess(self.scan()["hermes"]["bytes"] - before, 100_000)
+        self.assertLess(fd.du(str(self.root), dev, limit_s=30) - du_before, 100_000)
+
     def test_open_command_per_os_and_under(self):
         with mock.patch.object(fd, "WINDOWS", True), mock.patch.object(fd, "MACOS", False):
-            self.assertEqual(fd.open_command("C:\\x")[0], "explorer")
+            self.assertTrue(fd.open_command("C:\\x")[0].endswith("explorer.exe"))
         with mock.patch.object(fd, "WINDOWS", False), mock.patch.object(fd, "MACOS", True):
             self.assertEqual(fd.open_command("/x")[0], "open")
         self.assertTrue(fd.under(str(self.root / "cache" / "uv"), str(self.root)))
         self.assertFalse(fd.under("/etc", str(self.root)))
         self.assertFalse(fd.under(str(self.root) + "2", str(self.root)))  # a sibling that merely shares the prefix
+
+    def test_windows_direntry_without_device_ids(self):
+        """Windows' DirEntry.stat() reports st_dev 0, which never equals the root's device: the
+        walk must still enter subfolders, count a hardlink once, and size a Bot folder."""
+        expected_du = fd.du(str(self.root / "cache"), os.stat(self.root).st_dev)
+        with mock.patch.object(fd.os, "scandir", windows_scandir):
+            d = self.scan()
+            paths = {r["path"] for r in d["reclaimable"]}
+            self.assertIn("~/.hermes/cache/uv", paths)
+            self.assertIsNotNone(fd.recheck("~/.hermes/cache/uv", self.root))
+            skills = next(c for c in d["hermes"]["children"] if c["name"] == "skills")
+            self.assertLess(skills["bytes"], 2 * 40_000)
+            self.assertEqual(fd.du(str(self.root / "cache"), os.stat(self.root).st_dev), expected_du)
+        self.assertGreater(expected_du, 0)
+
+    def test_installed_pip_and_uv_are_not_caches(self):
+        """A folder named pip or uv inside site-packages is the installed package, not a cache."""
+        r = self.root
+        make(r, "tools/python-3.14/Lib/site-packages/pip/__init__.py", 50_000, OLD)
+        make(r, "tools/python-3.14/Lib/site-packages/uv/uv.exe", 50_000, OLD)
+        make(r, "web/venv/Lib/site-packages/pip/__init__.py", 50_000, OLD)
+        make(r, "cache/pip/http/x", 50_000)
+        paths = {x["path"] for x in self.scan()["reclaimable"]}
+        self.assertIn("~/.hermes/cache/pip", paths)                       # a real pip cache is still offered
+        for p in ("~/.hermes/tools/python-3.14/Lib/site-packages/pip",
+                  "~/.hermes/tools/python-3.14/Lib/site-packages/uv",
+                  "~/.hermes/web/venv/Lib/site-packages/pip"):
+            self.assertNotIn(p, paths)
+            self.assertIsNone(fd.recheck(p, self.root), p)
 
     def test_payload_has_no_private_fields(self):
         import json

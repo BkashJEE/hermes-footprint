@@ -84,7 +84,8 @@ KINDS = {
 # Never offered for removal, whatever the rules say: what a Bot needs to run.
 PROTECTED_NAMES = ["memories", "skills", "plugins", "desktop-plugins", "config.yaml", "auth.json", "auth.lock", ".env",
                    "profile.yaml", "SOUL.md", "cron", "hermes-agent"]
-PROTECTED = re.compile(r"(^|/)(state\.db[^/]*|" + "|".join(map(re.escape, PROTECTED_NAMES)) + r")(/|$)")
+# Case-insensitive: Windows and macOS treat SKILLS and skills as the same folder.
+PROTECTED = re.compile(r"(^|/)(state\.db[^/]*|" + "|".join(map(re.escape, PROTECTED_NAMES)) + r")(/|$)", re.IGNORECASE)
 
 
 def hermes_root() -> Path:
@@ -160,6 +161,20 @@ def request_stop(root: Path | None = None) -> dict:
     return {"ok": True}
 
 
+def entry_stat(e: os.DirEntry) -> os.stat_result:
+    """``e.stat()`` without following links, with the device, inode and link count filled in.
+    Windows' DirEntry.stat() leaves those at 0, so a device check would skip every folder and
+    hardlinks could not be told apart; ``os.stat`` reports them."""
+    s = e.stat(follow_symlinks=False)
+    return s if s.st_dev else os.stat(e.path, follow_symlinks=False)
+
+
+def is_link(s: os.stat_result) -> bool:
+    """A symlink, or on Windows any reparse point: a junction reports as a folder, and walking it
+    would count space outside ~/.hermes (or the same folders again, for a junction back inside)."""
+    return st.S_ISLNK(s.st_mode) or bool(getattr(s, "st_file_attributes", 0) & getattr(st, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 class Walker:
     """dust's shape, single-threaded: walk once, aggregate bottom-up, dedupe hardlinks."""
 
@@ -179,12 +194,12 @@ class Walker:
         with it:
             for e in it:
                 try:
-                    s = e.stat(follow_symlinks=False)
+                    s = entry_stat(e)
                 except OSError:
                     continue
                 if st.S_ISDIR(s.st_mode):
-                    if s.st_dev != self.dev or os.path.ismount(e.path):
-                        continue  # never enter another filesystem
+                    if s.st_dev != self.dev or is_link(s) or os.path.ismount(e.path):
+                        continue  # never enter another filesystem, a junction or a link
                     child = self.walk(e.path)
                     node["children"].append(child)
                     node["bytes"] += child["bytes"]; node["files"] += child["files"]
@@ -213,6 +228,28 @@ REBUILDABLE = {
     "GPUCache": "browser cache: rebuilt when needed", "ShaderCache": "browser cache: rebuilt when needed",
     "Crashpad": "crash reports",
 }
+# Package caches that share their name with an installed package: pip and uv are also folders in
+# site-packages, so a folder with that name directly inside a package folder is code, not cache.
+PACKAGE_NAMED = {"uv", "pip", "_cacache"}
+PACKAGE_FOLDERS = {"site-packages", "dist-packages", "node_modules"}
+
+
+def find_exe(name: str) -> str | None:
+    """A program on PATH. On Windows, never from the current folder: CreateProcess and
+    shutil.which look there first, so a planted git.exe would run instead."""
+    if not WINDOWS:
+        return shutil.which(name)
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if d and d != "." and os.path.isabs(d):
+            exe = os.path.join(d, name + ".exe")
+            if os.path.isfile(exe):
+                return exe
+    return None
+
+
+def windows_program(*rel: str) -> str:
+    """A program that ships with Windows, by its full path under %SystemRoot%."""
+    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", *rel)
 
 
 # Toolchains Hermes installs and expects to find (language servers, runtimes): not ours to offer.
@@ -225,8 +262,12 @@ def git_info(path: str | None) -> dict | None:
     if not path:
         return None
 
+    git = find_exe("git")
+    if not git:
+        return None
+
     def run(*args):
-        r = subprocess.run(["git", "--no-optional-locks", "-C", path, *args], capture_output=True,
+        r = subprocess.run([git, "--no-optional-locks", "-C", path, *args], capture_output=True,
                            text=True, timeout=30, env={**os.environ, "GIT_NO_LAZY_FETCH": "1"})
         return r.stdout if r.returncode == 0 else None
     try:
@@ -250,10 +291,11 @@ def git_info(path: str | None) -> dict | None:
 
 
 def git_dirty(path: str | None) -> int:
-    if not path:
+    git = find_exe("git") if path else None
+    if not git:
         return 0
     try:
-        run = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain"],
+        run = subprocess.run([git, "--no-optional-locks", "-C", path, "status", "--porcelain"],
                              capture_output=True, text=True, timeout=20,
                              env={**os.environ, "GIT_NO_LAZY_FETCH": "1"})
         return len([l for l in run.stdout.splitlines() if l.strip()]) if run.returncode == 0 else 0
@@ -270,9 +312,9 @@ def reclaim_reason(rel: str, node: dict, siblings: list, parent_rel: str, now: f
     sib = {s["name"] for s in siblings} | set(sib_files)
     if name == "node_modules" and "package.json" in sib and not HERMES_MANAGED.search(rel):
         return "reinstallable (npm install brings it back)"
-    if name in REBUILDABLE:
-        return REBUILDABLE[name]
     parent = os.path.basename(parent_rel)
+    if name in REBUILDABLE and not (name in PACKAGE_NAMED and parent in PACKAGE_FOLDERS):
+        return REBUILDABLE[name]
     if parent in ("backups", "profile-exports") or name.startswith("profiles-backup"):
         newest = sorted((s for s in siblings), key=lambda s: -s["mtime"])[:2]
         if age > BACKUP_AGE and node not in newest:
@@ -428,11 +470,11 @@ def du(path: str, dev: int, limit_s: float = 4.0) -> int | None:
             with os.scandir(d) as it:
                 for e in it:
                     try:
-                        s = e.stat(follow_symlinks=False)
+                        s = entry_stat(e)
                     except OSError:
                         continue
                     if st.S_ISDIR(s.st_mode):
-                        if s.st_dev == dev:
+                        if s.st_dev == dev and not is_link(s):
                             stack.append(e.path)
                     else:
                         if s.st_nlink > 1:
@@ -487,14 +529,14 @@ def trash_command(real: str) -> list | None:
     """The desktop's own 'move to trash' for this OS, as an argv list (never a shell string).
     Linux: gio or trash-cli. macOS: Finder. Windows: the Recycle Bin through .NET. None when no tool."""
     if WINDOWS:
-        ps = shutil.which("powershell") or shutil.which("pwsh")
-        if not ps:
-            return None
+        ps = windows_program("System32", "WindowsPowerShell", "v1.0", "powershell.exe")
         kind = "DeleteDirectory" if os.path.isdir(real) else "DeleteFile"
-        quoted = real.replace("'", "''")
+        # The path reaches PowerShell as data (send_to_trash sets FOOTPRINT_TRASH_PATH), never as
+        # script text: PowerShell also ends a '...' string at typographic quotes, so escaping ' is
+        # not enough and a folder name could run code.
         return [ps, "-NoProfile", "-NonInteractive", "-Command",
-                "Add-Type -AssemblyName Microsoft.VisualBasic; "
-                f"[Microsoft.VisualBasic.FileIO.FileSystem]::{kind}('{quoted}', 'OnlyErrorDialogs', 'SendToRecycleBin')"]
+                "$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName Microsoft.VisualBasic; "
+                f"[Microsoft.VisualBasic.FileIO.FileSystem]::{kind}($env:FOOTPRINT_TRASH_PATH, 'OnlyErrorDialogs', 'SendToRecycleBin')"]
     if MACOS:
         if not shutil.which("osascript"):
             return None
@@ -522,7 +564,7 @@ def send_to_trash(real: str) -> str | None:
     cmd = trash_command(real)
     if not cmd:
         return "no trash tool found (Linux: gio or trash-cli; macOS: osascript; Windows: PowerShell)"
-    run = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    run = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env={**os.environ, "FOOTPRINT_TRASH_PATH": real})
     if run.returncode == 0:
         return None
     return (run.stderr.strip().splitlines() or run.stdout.strip().splitlines() or ["failed"])[-1]
@@ -536,11 +578,14 @@ def recheck(display: str, root: Path, now: float | None = None) -> dict | None:
     if not display.startswith("~/.hermes/"):
         return None
     rel = display[len("~/.hermes/"):]
-    if PROTECTED.search(rel):
-        return None
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") or "\\" in p for p in parts) or PROTECTED.search(rel):
+        return None  # only the '/'-joined form the scan itself produces
     real = real_path(display, root)
     if real == Path(root) or not under(str(real), str(root)) or not real.exists():
         return None
+    if os.path.normcase(os.path.realpath(real)) != os.path.normcase(os.path.join(os.path.realpath(root), *parts)):
+        return None  # a symlink or junction on the way leads somewhere else
     dev = os.stat(root).st_dev
     if real.is_dir():
         node = Walker(dev).walk(str(real))
@@ -622,7 +667,7 @@ def open_folder(path: str, root: Path | None = None) -> dict:
 
 def open_command(real: str) -> list | None:
     if WINDOWS:
-        return ["explorer", real]
+        return [windows_program("explorer.exe"), real]
     if MACOS:
         return ["open", real]
     if shutil.which("gio"):
